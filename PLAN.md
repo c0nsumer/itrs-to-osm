@@ -486,3 +486,25 @@ first two reuse it.
 - taginfo for `mtb:scale:itrs` (no uses as of 2026-Oct-11)
 - `~/projects/trailmaps.app-map-generator/scripts/overpass.py` for the
   Overpass client conventions
+
+## Updates
+
+2026-Oct-12: Milestones 1 to 4 built and committed; the report renderers and
+README are in progress. Things that changed from the plan above while
+building against the real tracks:
+
+- Intervals carry projection-independent positions (edge index plus fraction
+  along the edge) as well as meters, so claims from tracks matched in
+  different local frames line up exactly on the same way.
+- The junction extension that lets neighboring intervals meet at a shared
+  node is bounded to 40 m along the way. Without that, Loam Rider's 5-vertex
+  tail onto Flo'Rion stretched to 99 m and escaped the minimum piece rule.
+- Tails are dropped for offset as well as length: a secondary interval whose
+  90th percentile offset exceeds `--max-offset` goes to the report, not the
+  map. That's what catches the Loam Rider tail (22 m, 17.7 m off).
+- Same-tag claims from one track merge before overlaps are resolved, so a
+  track rating a whole way at one level beats another track's shorter claim.
+- A way that is the only way member of a relation is treated as direction
+  irrelevant (JOSM's word), not unknown, so the report doesn't warn about it.
+- shapely turned out unnecessary; the geometry is a few hundred lines of
+  pure Python, and the only runtime dependency is `requests`.
