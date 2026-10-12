@@ -113,6 +113,7 @@ class RelationChange:
     label: str
     direction: str  # "forward" | "backward" | "unknown"
     warning: str | None = None
+    role: str = ""  # copied from the original member onto every piece, as JOSM does
 
 
 @dataclass
@@ -454,7 +455,9 @@ def _fix_relations(
                 warning = "direction unknown (neighboring members not downloaded); check order"
             elif rtype not in ORDERED_RELATION_TYPES:
                 warning = f"relation type {rtype!r} is not an ordered type; check membership"
-            change.relations.append(RelationChange(relation.id, label, direction, warning))
+            change.relations.append(
+                RelationChange(relation.id, label, direction, warning, role=m.role)
+            )
         if touched:
             relation.members = new_members
             data.invalidate_index()

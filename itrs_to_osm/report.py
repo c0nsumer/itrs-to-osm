@@ -448,6 +448,11 @@ def _ways_section(ctx: RunContext) -> list[Block]:
                 else f"pieces inserted {rc.direction}"
             )
             line = f"relation {rc.relation_id} {rc.label} ({rtype}): {how}"
+            if rc.role:
+                line += (
+                    f"; the pieces carry role '{rc.role}', copied from the original member "
+                    "(a validator warning about this role is about the existing tagging)"
+                )
             if rc.warning:
                 line += f"; warning: {rc.warning}"
             items.append(line)
