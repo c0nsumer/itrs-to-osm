@@ -660,13 +660,7 @@ def _rating_points(ctx: RunContext) -> list[Block]:
 
 
 def _advisories(ctx: RunContext) -> list[Block]:
-    blocks: list[Block] = [
-        Heading(2, "Advisories"),
-        Para(
-            "These are for the reviewer to judge in JOSM. The tool never edits oneway, foot, "
-            "bicycle, or any tag other than the two ITRS keys."
-        ),
-    ]
+    blocks: list[Block] = [Heading(2, "Advisories")]
     for title, lines in (
         ("Existing ITRS values overwritten", _overwritten(ctx)),
         ("Direction", _direction_mismatches(ctx)),

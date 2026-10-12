@@ -366,7 +366,7 @@ Markdown, always. Sections:
 
 HTML is the stretch goal: the same content plus a Leaflet map showing the
 ITRS track, the matched way pieces colored by rating in the official ITRS
-colors, and anything unmatched in grey. OSM raster tiles with attribution are fine for a local
+colors, and anything unmatched in grey. CyclOSM raster tiles with attribution are fine for a local
 review page at this volume.
 
 ## Stack
@@ -519,3 +519,9 @@ building against the real tracks:
   (`tests/test_review_regressions.py`). Along the way, vertices are now
   re-projected for continuity after the decode, which also settles hairpins.
 - Pending human check: open the four generated `.osm` files in JOSM.
+- 2026-Oct-12: the HTML report's map showed the OSMF "Blocked" tile. The
+  standard layer requires a Referer header and a page opened from file://
+  never sends one, so the map now uses CyclOSM tiles (OSM France), which
+  serve without a Referer and render mtb:scale. The Advisories preamble
+  about what the tool doesn't edit was removed at Steve's request: the
+  report says what was done, not what wasn't.

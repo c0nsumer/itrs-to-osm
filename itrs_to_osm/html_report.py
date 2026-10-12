@@ -1,7 +1,11 @@
 """The HTML report: the same blocks as the Markdown report, plus a Leaflet map.
 
 The page is one self-contained file. The only outside requests are the
-Leaflet CSS and JS (pinned on unpkg) and OSM raster tiles. The map shows the
+Leaflet CSS and JS (pinned on unpkg) and CyclOSM raster tiles. The OSM
+Foundation's standard tiles need an HTTP Referer, which a page opened from
+file:// never sends, so they come back as the "Blocked" tile; CyclOSM
+(hosted by OpenStreetMap France) serves without one and renders mtb:scale,
+which suits a trail review. The map shows the
 ITRS track as a thin dashed line, each tagged way piece in the official ITRS
 color for its technical difficulty, unmatched segments in grey, paved-road
 segments in the ITRS road purple, and bike-only segments with a yellow
@@ -279,9 +283,9 @@ def _script_json(value: Any) -> str:
 
 _MAP_JS = """
 const map = L.map("map");
-L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+L.tileLayer("https://{s}.tile-cyclosm.openstreetmap.fr/cyclosm/{z}/{x}/{y}.png", {
   maxZoom: 19,
-  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+  attribution: '<a href="https://www.cyclosm.org/">CyclOSM</a> | Map data &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
 }).addTo(map);
 for (const line of MAP_DATA.lines) {
   L.polyline(line.coords, line.style).bindPopup(line.popup).addTo(map);
