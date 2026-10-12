@@ -91,6 +91,38 @@ def project_point(p: XY, points: list[XY], cum: list[float] | None = None) -> Pr
     return best
 
 
+def project_point_window(
+    p: XY, points: list[XY], cum: list[float], near: float, window: float
+) -> Projection | None:
+    """Like project_point, but only onto edges within `window` m of chainage `near`.
+
+    Used to keep consecutive track vertices on the same stretch of a way: a
+    way that revisits a node or doubles back on itself has two equally
+    near edges, and the unconstrained projection picks either.
+    """
+    lo, hi = near - window, near + window
+    best: Projection | None = None
+    px, py = p
+    for i in range(len(points) - 1):
+        if cum[i + 1] < lo or cum[i] > hi:
+            continue
+        ax, ay = points[i]
+        bx, by = points[i + 1]
+        dx, dy = bx - ax, by - ay
+        length2 = dx * dx + dy * dy
+        if length2 == 0.0:
+            t = 0.0
+        else:
+            t = ((px - ax) * dx + (py - ay) * dy) / length2
+            t = 0.0 if t < 0.0 else 1.0 if t > 1.0 else t
+        cx, cy = ax + t * dx, ay + t * dy
+        d = math.hypot(px - cx, py - cy)
+        if best is None or d < best.distance:
+            along = cum[i] + t * (cum[i + 1] - cum[i])
+            best = Projection(d, along, i, t, (cx, cy))
+    return best
+
+
 def point_at(points: list[XY], cum: list[float], along: float) -> tuple[XY, int, float]:
     """Point at chainage `along`, clamped to the polyline. Returns (xy, edge index, t)."""
     if along <= 0.0:

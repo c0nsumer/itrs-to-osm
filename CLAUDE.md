@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-In development, milestone by milestone per `PLAN.md` (the reviewed design; follow it). `project_startup.txt` is the original project brief. Milestones 1-4 (scaffold, parser, Overpass/OSM layer, matching, cutting) are done; the report and README are milestone 5. Keep the "Commands" and "Architecture" sections below current as modules land.
+In development, milestone by milestone per `PLAN.md` (the reviewed design; follow it). `project_startup.txt` is the original project brief. Milestones 1-5 are done (scaffold, parser, Overpass/OSM layer, matching, cutting, reports, README) and an independent review's findings are fixed. Next: the user opens the generated `.osm` files in JOSM (milestone 4 acceptance), then release prep. Keep the "Commands" and "Architecture" sections below current as modules land.
 
 ## Commands
 

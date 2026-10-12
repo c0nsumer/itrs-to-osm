@@ -75,6 +75,7 @@ class Cut:
     at_m: float
     kind: str  # "junction" | "node" | "inserted"
     node_id: int
+    index: int  # vertex index in the way at placement time (ways can revisit a node)
 
     @property
     def moved_m(self) -> float:
@@ -172,7 +173,9 @@ def _chainage(data: OsmData, way: Way) -> list[float]:
 
 def _pos_to_m(pos: WayPos, cum: list[float]) -> float:
     index, t = pos
-    index = max(0, min(index, len(cum) - 2))
+    if index >= len(cum) - 1:
+        return cum[-1]
+    index = max(0, index)
     return cum[index] + t * (cum[index + 1] - cum[index])
 
 
@@ -227,8 +230,13 @@ def _merge_same_track(claims: list[Claim]) -> list[Claim]:
     return out
 
 
-def _resolve_zones(claims: list[Claim], notes: list[str]) -> list[Zone]:
-    """Longer claims win overlaps; equal tags merge; result sorted by chainage."""
+def _resolve_zones(claims: list[Claim], notes: list[str], min_piece_m: float) -> list[Zone]:
+    """Longer claims win overlaps; equal tags merge; result sorted by chainage.
+
+    A leftover of a trimmed claim shorter than the minimum piece is dropped
+    (with a note) rather than becoming a sliver. A short claim that was not
+    trimmed at all is kept: a short segment is real data.
+    """
     zones: list[Zone] = []
     for claim in sorted(claims, key=lambda c: -c.length):
         parts = [(claim.start_m, claim.end_m)]
@@ -251,7 +259,13 @@ def _resolve_zones(claims: list[Claim], notes: list[str]) -> list[Zone]:
                 )
             parts = trimmed
         for a, b in parts:
-            if b - a < 1.0:
+            trimmed_part = (b - a) < claim.length - 0.5
+            if b - a < 1.0 or (trimmed_part and b - a < min_piece_m):
+                if b - a >= 1.0:
+                    notes.append(
+                        f"{b - a:.0f} m of {claim.label} between {a:.0f} and {b:.0f} m dropped "
+                        f"(leftover after overlap, shorter than {min_piece_m:.0f} m)"
+                    )
                 continue
             zones.append(Zone(a, b, dict(claim.tags), list(claim.sources)))
     zones.sort(key=lambda z: z.start_m)
@@ -271,13 +285,13 @@ def _tidy_zones(zones: list[Zone], length_m: float, min_piece_m: float, notes: l
     if not zones:
         return
     first, last = zones[0], zones[-1]
-    if 0.0 < first.start_m < min_piece_m:
+    if 0.5 < first.start_m < min_piece_m:
         notes.append(
             f"rating extended {first.start_m:.0f} m to the way start (shorter than "
             f"{min_piece_m:.0f} m)"
         )
         first.start_m = 0.0
-    if 0.0 < length_m - last.end_m < min_piece_m:
+    if 0.5 < length_m - last.end_m < min_piece_m:
         notes.append(
             f"rating extended {length_m - last.end_m:.0f} m to the way end (shorter than "
             f"{min_piece_m:.0f} m)"
@@ -285,7 +299,7 @@ def _tidy_zones(zones: list[Zone], length_m: float, min_piece_m: float, notes: l
         last.end_m = length_m
     for a, b in zip(zones, zones[1:]):
         gap = b.start_m - a.end_m
-        if 0.0 < gap < min_piece_m:
+        if 0.5 < gap < min_piece_m:
             notes.append(
                 f"{gap:.0f} m gap between {', '.join(a.sources)} and {', '.join(b.sources)} "
                 f"closed (shorter than {min_piece_m:.0f} m)"
@@ -303,33 +317,46 @@ def _tidy_zones(zones: list[Zone], length_m: float, min_piece_m: float, notes: l
             i += 1
 
 
-def _is_junction(data: OsmData, way: Way, index: int) -> bool:
-    node_id = way.nodes[index]
-    if index == 0 or index == len(way.nodes) - 1:
-        return True
-    return len(data.parent_ways(node_id)) > 1
+def _is_junction(data: OsmData, node_id: int) -> bool:
+    """Shared with another highway way (an area outline or fence doesn't count)."""
+    return sum(1 for w in data.parent_ways(node_id) if w.tags.get("highway")) > 1
 
 
 def _place_cut(
-    data: OsmData, way: Way, requested_m: float, options: CutOptions, used: set[int]
+    data: OsmData,
+    way: Way,
+    requested_m: float,
+    options: CutOptions,
+    used: set[int],
+    max_move_m: float,
 ) -> Cut:
-    """Choose or create the node for a cut, inserting into the way if needed."""
+    """Choose or create the node for a cut, inserting into the way if needed.
+
+    Never the way's end nodes (that would make a one-node piece), never a
+    node another cut already uses, and never further than ``max_move_m`` (half
+    the distance to the neighboring cut or way end), so two cuts can't
+    collapse into one and silently erase the zone between them.
+    """
     cum = _chainage(data, way)
     best_junction: tuple[float, int] | None = None
     best_node: tuple[float, int] | None = None
-    for k in range(len(way.nodes)):
+    for k in range(1, len(way.nodes) - 1):
+        if way.nodes[k] in used:
+            continue
         d = abs(cum[k] - requested_m)
-        if d <= options.snap_junction_m and _is_junction(data, way, k):
+        if d > max_move_m:
+            continue
+        if d <= options.snap_junction_m and _is_junction(data, way.nodes[k]):
             if best_junction is None or d < best_junction[0]:
                 best_junction = (d, k)
         if d <= options.snap_m and (best_node is None or d < best_node[0]):
             best_node = (d, k)
     if best_junction is not None:
         k = best_junction[1]
-        return Cut(requested_m, cum[k], "junction", way.nodes[k])
+        return Cut(requested_m, cum[k], "junction", way.nodes[k], k)
     if best_node is not None:
         k = best_node[1]
-        return Cut(requested_m, cum[k], "node", way.nodes[k])
+        return Cut(requested_m, cum[k], "node", way.nodes[k], k)
 
     # Insert a new node on the way's own geometry at the requested chainage.
     k = max(i for i in range(len(cum) - 1) if cum[i] <= requested_m)
@@ -346,14 +373,17 @@ def _place_cut(
     nodes = list(way.nodes)
     nodes.insert(k + 1, node.id)
     data.set_way_nodes(way, nodes)
-    return Cut(requested_m, requested_m, "inserted", node.id)
+    return Cut(requested_m, requested_m, "inserted", node.id, k + 1)
 
 
-def _way_direction(data: OsmData, relation: Relation, index: int, way: Way) -> str:
-    """forward | backward | unknown, from the nearest way members on either side."""
-    if len(way.nodes) > 1 and way.nodes[0] == way.nodes[-1]:
+def _way_direction(data: OsmData, relation: Relation, index: int, first: int, last: int) -> str:
+    """forward | backward | unknown, from the nearest way members on either side.
+
+    ``first``/``last`` are the ORIGINAL way's end nodes, captured before the
+    split truncated the keeper piece.
+    """
+    if first == last:
         return "forward"  # closed way: order is irrelevant
-    first, last = way.nodes[0], way.nodes[-1]
     members = relation.members
 
     def ends(i: int) -> tuple[int, int] | None:
@@ -394,9 +424,16 @@ def _way_direction(data: OsmData, relation: Relation, index: int, way: Way) -> s
     return "forward" if neighbors == 0 else "unknown"
 
 
-def _fix_relations(data: OsmData, way: Way, pieces_in_order: list[Way], change: WayChange) -> int:
+def _fix_relations(
+    data: OsmData,
+    way: Way,
+    pieces_in_order: list[Way],
+    change: WayChange,
+    original_ends: tuple[int, int],
+) -> int:
     """Insert split pieces next to the original member in every parent relation."""
     count = 0
+    first, last = original_ends
     for relation in data.parent_relations(way):
         new_members: list[Member] = []
         touched = False
@@ -404,7 +441,7 @@ def _fix_relations(data: OsmData, way: Way, pieces_in_order: list[Way], change: 
             if m.type != "way" or m.ref != way.id:
                 new_members.append(m)
                 continue
-            direction = _way_direction(data, relation, index, way)
+            direction = _way_direction(data, relation, index, first, last)
             ordered = (
                 pieces_in_order if direction != "backward" else list(reversed(pieces_in_order))
             )
@@ -424,6 +461,30 @@ def _fix_relations(data: OsmData, way: Way, pieces_in_order: list[Way], change: 
             data.mark_modified(relation)
             count += 1
     return count
+
+
+def _zone_for(zones: list[Zone], start_m: float, end_m: float) -> Zone | None:
+    """The zone covering most of a piece, if it covers at least half of it."""
+    best, best_overlap = None, 0.0
+    for z in zones:
+        overlap = min(end_m, z.end_m) - max(start_m, z.start_m)
+        if overlap > best_overlap:
+            best, best_overlap = z, overlap
+    if best is not None and best_overlap >= 0.5 * max(end_m - start_m, 1e-9):
+        return best
+    return None
+
+
+def _plan_ranges(
+    data: OsmData, way: Way, cuts: list[Cut], zones: list[Zone]
+) -> list[tuple[int, int, Zone | None]]:
+    """(first index, last index, zone) per piece the current cuts would make."""
+    cum = _chainage(data, way)
+    bounds = [0, *(c.index for c in cuts), len(way.nodes) - 1]
+    return [
+        (bounds[i], bounds[i + 1], _zone_for(zones, cum[bounds[i]], cum[bounds[i + 1]]))
+        for i in range(len(bounds) - 1)
+    ]
 
 
 def apply_matches(
@@ -446,7 +507,7 @@ def apply_matches(
         )
         result.ways.append(change)
 
-        zones = _resolve_zones(all_claims[way_id], change.notes)
+        zones = _resolve_zones(all_claims[way_id], change.notes, options.min_piece_m)
         _tidy_zones(zones, length_m, options.min_piece_m, change.notes)
         change.zones = zones
         if not zones:
@@ -462,25 +523,48 @@ def apply_matches(
             continue
         change.refusals = []
 
-        # Cuts: every zone edge strictly inside the way.
+        # Cuts: every zone edge strictly inside the way. Each may move at most
+        # halfway to its neighbors, so cuts never merge or cross.
         wanted = sorted(
             {m for z in zones for m in (z.start_m, z.end_m) if 0.5 < m < length_m - 0.5}
         )
+        original_ends = (way.nodes[0], way.nodes[-1])
         used: set[int] = set()
-        for requested in wanted:
-            cut = _place_cut(data, way, requested, options, used)
-            if cut.node_id in used:
-                continue
+        for n, requested in enumerate(wanted):
+            before_m = wanted[n - 1] if n > 0 else 0.0
+            after_m = wanted[n + 1] if n < len(wanted) - 1 else length_m
+            max_move = min(
+                options.snap_junction_m, (requested - before_m) / 2, (after_m - requested) / 2
+            )
+            cut = _place_cut(data, way, requested, options, used, max_move)
             used.add(cut.node_id)
             change.cuts.append(cut)
-            if cut.kind == "inserted":
-                result.nodes_added += 1
-        cum = _chainage(data, way)  # inserted nodes changed it
+        change.cuts.sort(key=lambda c: c.index)
+
+        # A cut between two pieces that would end up with the same tags is
+        # pointless (a snapped cut can do that); remove it, and any node it
+        # inserted, before splitting.
+        ranges_planned = _plan_ranges(data, way, change.cuts, zones)
+        for i in range(len(ranges_planned) - 1, 0, -1):
+            za, zb = ranges_planned[i - 1][2], ranges_planned[i][2]
+            if (za.tags if za else None) == (zb.tags if zb else None):
+                cut = change.cuts.pop(i - 1)
+                if cut.kind == "inserted":
+                    nodes = list(way.nodes)
+                    nodes.pop(cut.index)
+                    data.set_way_nodes(way, nodes)
+                    del data.nodes[cut.node_id]
+                    for later in change.cuts[i - 1 :]:
+                        later.index -= 1
+                change.notes.append(
+                    f"cut at {cut.requested_m:.0f} m dropped: both sides would carry the same tags"
+                )
+                ranges_planned = _plan_ranges(data, way, change.cuts, zones)
+        result.nodes_added += sum(1 for c in change.cuts if c.kind == "inserted")
+        cum = _chainage(data, way)
 
         # Split at the cut nodes, JOSM-style: most nodes keeps the id.
-        cut_indices = sorted(way.nodes.index(c.node_id) for c in change.cuts)
-        bounds = [0, *cut_indices, len(way.nodes) - 1]
-        ranges = [(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1)]
+        ranges = [(a, b) for a, b, _ in ranges_planned]
         keeper = max(range(len(ranges)), key=lambda i: (ranges[i][1] - ranges[i][0], -i))
         original_tags = dict(way.tags)
         all_nodes = list(way.nodes)  # slice from the untouched list; the keeper shrinks below
@@ -498,15 +582,10 @@ def apply_matches(
                 result.ways_added += 1
             pieces_in_order.append(piece_way)
             start_m, end_m = cum[a], cum[b]
-            # Tag by the zone overlapping most of the piece.
-            best, best_overlap = None, 0.0
-            for z in zones:
-                overlap = min(end_m, z.end_m) - max(start_m, z.start_m)
-                if overlap > best_overlap:
-                    best, best_overlap = z, overlap
+            best = ranges_planned[i][2]
             after = dict(piece_way.tags)
             sources: list[str] = []
-            if best is not None and best_overlap >= 0.5 * max(end_m - start_m, 1e-9):
+            if best is not None:
                 after.update(best.tags)
                 sources = list(best.sources)
             pieces.append(
@@ -523,6 +602,14 @@ def apply_matches(
             )
             piece_way.tags = after
 
+        covered = {id(z) for _, _, z in ranges_planned if z is not None}
+        for z in zones:
+            if id(z) not in covered:
+                change.notes.append(
+                    f"rating from {', '.join(z.sources)} ({z.start_m:.0f} to {z.end_m:.0f} m) "
+                    "did not land on any piece after cuts were placed; check in JOSM"
+                )
+
         change.pieces = pieces
         split = len(ranges) > 1
         tag_change = any(p.changed for p in pieces)
@@ -533,7 +620,9 @@ def apply_matches(
             change.notes.append("already tagged with these values; nothing to change")
             # Undo bookkeeping for new elements: none were created without a split.
         if split:
-            result.relations_modified += _fix_relations(data, way, pieces_in_order, change)
+            result.relations_modified += _fix_relations(
+                data, way, pieces_in_order, change, original_ends
+            )
         else:
             # No split: leave relations alone. The single piece is the way itself.
             pass

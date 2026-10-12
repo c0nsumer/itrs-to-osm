@@ -34,6 +34,7 @@ from .geo import (
     normalize_name,
     percentile,
     project_point,
+    project_point_window,
 )
 from .itrs import (
     TRACK_TYPE_PAVED,
@@ -52,6 +53,8 @@ WayPos = tuple[int, float]
 
 
 def way_pos(index: int, t: float, edge_count: int) -> WayPos:
+    if index >= edge_count:  # a vertex index past the last edge: the way's end
+        return (edge_count - 1, 1.0)
     if t >= 1.0 and index < edge_count - 1:
         return (index + 1, 0.0)
     return (index, t)
@@ -66,6 +69,7 @@ SWITCH_UNCONNECTED = 12.0  # moving to a way with no junction nearby
 SWITCH_NONE = 3.0  # leaving or rejoining the network
 JUMP_PENALTY = 15.0  # chainage jumping along the same way (switchback fold)
 JUNCTION_REACH_M = 40.0  # a shared node this close to the vertex counts as "here"
+REFINE_TOL_M = 3.0  # prefer the continuous edge when it's within this of the nearest
 
 PATH_LIKE = frozenset({"path", "cycleway", "footway", "bridleway", "steps"})
 TRACK_LIKE = frozenset({"track"})
@@ -398,10 +402,36 @@ def _decode(
     return path
 
 
+def _refine_path(
+    path: list[tuple[int | None, Projection | None]],
+    verts: list[XY],
+    gaps: list[float],
+    candidates: list[_Candidate],
+) -> None:
+    """Re-project each vertex near the previous vertex's chainage on the same way.
+
+    The decode picks the way; this picks the stretch of it. Around a hairpin,
+    or at a node the way visits twice, the globally nearest edge can be the
+    wrong fold while an edge a few meters further is the one the ride is
+    actually on. Forward pass, in place.
+    """
+    for i in range(1, len(path)):
+        ci, p = path[i]
+        pci, pp = path[i - 1]
+        if ci is None or p is None or pci != ci or pp is None:
+            continue
+        cand = candidates[ci]
+        window = max(3.0 * gaps[i - 1] + 10.0, 25.0)
+        q = project_point_window(verts[i], cand.xy, cand.cum, pp.along, window)
+        if q is not None and q.distance <= p.distance + REFINE_TOL_M:
+            path[i] = (ci, q)
+
+
 def _intervals_for_segment(
     seg_index: int,
     ranges: list[tuple[int, int]],
     verts: list[XY],
+    gaps: list[float],
     path: list[tuple[int | None, Projection | None]],
     candidates: list[_Candidate],
     shared_cache: dict,
@@ -414,14 +444,23 @@ def _intervals_for_segment(
     groups: list[tuple[int, list[int]]] = []  # (candidate index, vertex indices)
     unmatched = 0
     for i in range(s, e + 1):
-        ci, _ = path[i]
-        if ci is None:
+        ci, p = path[i]
+        if ci is None or p is None:
             unmatched += 1
             continue
         if groups and groups[-1][0] == ci:
-            groups[-1][1].append(i)
-        else:
-            groups.append((ci, [i]))
+            # Same way. On a closed loop, crossing the seam (chainage wrapping
+            # from the end back to 0) starts a new stretch; anything else on
+            # the same way is one continuous ride, however the vertices
+            # project around a hairpin.
+            cand = candidates[ci]
+            closed = cand.way.nodes[0] == cand.way.nodes[-1]
+            prev_p = path[groups[-1][1][-1]][1]
+            assert prev_p is not None
+            if not (closed and abs(p.along - prev_p.along) > cand.cum[-1] / 2):
+                groups[-1][1].append(i)
+                continue
+        groups.append((ci, [i]))
 
     # A lone boundary vertex (shared with the neighboring segment) sitting on
     # the neighboring way at a junction is not a tail of this segment; the
@@ -453,6 +492,9 @@ def _intervals_for_segment(
         first, last = projs[0], projs[-1]
         assert first is not None and last is not None
         reverse = last.along < first.along
+        # Extent from the end vertices (a segment boundary is a shared vertex,
+        # so neighbors meet exactly), not from the extreme chainages: around a
+        # hairpin, interior vertices can project onto the other fold.
         lo, hi = (last, first) if reverse else (first, last)
         a0, a1 = lo.along, hi.along
         p0 = way_pos(lo.index, lo.t, cand.edge_count)
@@ -476,15 +518,18 @@ def _intervals_for_segment(
             if abs(along - near) > JUNCTION_REACH_M:
                 return
             if toward_start and along < a0:
-                a0, p0 = along, (k, 0.0)
+                a0, p0 = along, way_pos(k, 0.0, cand.edge_count)
             elif not toward_start and along > a1:
                 a1, p1 = along, way_pos(k, 0.0, cand.edge_count)
 
+        # Between two stretches of the same way, only a closed way has a node
+        # (the closing one) that both stretches should meet at.
+        closed = cand.way.nodes[0] == cand.way.nodes[-1]
         prev = candidates[groups[g - 1][0]] if g > 0 else before
-        if prev is not None:
+        if prev is not None and (prev is not cand or closed):
             extend(cand, prev, verts[idxs[0]], first.along, toward_start=not reverse)
         nxt = candidates[groups[g + 1][0]] if g < len(groups) - 1 else after
-        if nxt is not None:
+        if nxt is not None and (nxt is not cand or closed):
             extend(cand, nxt, verts[idxs[-1]], last.along, toward_start=reverse)
 
         if a1 - a0 < 1.0 and len(groups) > 1:
@@ -516,6 +561,7 @@ def match_track(track: Track, data: OsmData, options: MatchOptions | None = None
         path: list[tuple[int | None, Projection | None]] = [(None, None)] * len(verts)
     else:
         path = _decode(verts, ranges, gaps, track, candidates, options)
+        _refine_path(path, verts, gaps, candidates)
 
     shared_cache: dict = {}
     results: list[SegmentMatch] = []
@@ -523,7 +569,7 @@ def match_track(track: Track, data: OsmData, options: MatchOptions | None = None
         s, e = ranges[j]
         sm = SegmentMatch(segment=seg, total_vertices=e - s + 1)
         intervals, sm.unmatched_vertices = _intervals_for_segment(
-            j, ranges, verts, path, candidates, shared_cache
+            j, ranges, verts, gaps, path, candidates, shared_cache
         )
         offsets = [path[i][1].distance for i in range(s, e + 1) if path[i][1] is not None]  # type: ignore[union-attr]
         sm.p90_offset = percentile(offsets, 90)

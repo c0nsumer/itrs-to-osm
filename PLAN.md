@@ -508,3 +508,14 @@ building against the real tracks:
   irrelevant (JOSM's word), not unknown, so the report doesn't warn about it.
 - shapely turned out unnecessary; the geometry is a few hundred lines of
   pure Python, and the only runtime dependency is `requests`.
+- An independent review (Opus) of the matcher and splitter found six bugs
+  before any JOSM run, five reproduced: an interval ending at a way's last
+  node lost the last edge; a track crossing a loop's closing node tagged
+  the far side of the loop; a cut could snap onto a way's end node and
+  make a one-node way; relation direction was read from the already
+  truncated keeper piece; two cuts could snap to one junction node and
+  silently erase the zone between them; and a cut on a node a way visits
+  twice used the first occurrence. All fixed with regression tests
+  (`tests/test_review_regressions.py`). Along the way, vertices are now
+  re-projected for continuity after the decode, which also settles hairpins.
+- Pending human check: open the four generated `.osm` files in JOSM.
