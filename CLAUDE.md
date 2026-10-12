@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-In development, milestone by milestone per `PLAN.md` (the reviewed design; follow it). `project_startup.txt` is the original project brief. Milestones 1-5 are done (scaffold, parser, Overpass/OSM layer, matching, cutting, reports, README) and an independent review's findings are fixed. Next: the user opens the generated `.osm` files in JOSM (milestone 4 acceptance), then release prep. Keep the "Commands" and "Architecture" sections below current as modules land.
+In development, milestone by milestone per `PLAN.md` (the reviewed design; follow it). `project_startup.txt` is the original project brief. Milestones 1-6 are done (scaffold, parser, Overpass/OSM layer, matching, cutting, Markdown and HTML reports, README), an independent review's findings are fixed, and the user has made real OSM edits with the output (2026-Oct-12). Next: incorporate feedback from ITRS and the Copper Harbor Trails Club, then release prep (milestone 7) when the user says so. Keep the "Commands" and "Architecture" sections below current as modules land.
 
 ## Commands
 
