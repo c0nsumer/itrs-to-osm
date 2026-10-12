@@ -1,0 +1,23 @@
+# Private reference material: the original project brief, the ITRS schema
+# notes, the ITRS rating data explanation PDF, and the sample ITRS exports
+# provided by trail raters. Keep local.
+project_startup.txt
+itrs_osm_schema.csv
+*.pdf
+*.zip
+geojson-export_*.geojson
+tests/private/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+
+# Tool output and cache (default locations)
+cache/
+out/

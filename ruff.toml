@@ -1,0 +1,16 @@
+# Ruff configuration, matching the rule set used by trailmaps.app-map-generator.
+#   ruff check itrs_to_osm/ tests/
+#   ruff format itrs_to_osm/ tests/
+
+target-version = "py311"
+line-length = 100
+
+extend-exclude = [".venv", "build", "dist", "cache", "out"]
+
+[lint]
+# pyflakes errors, import sorting, safe modernizations, common bug patterns.
+select = ["E", "F", "I", "UP", "B"]
+ignore = [
+    "E501", # line too long: deliberate long URLs and f-strings
+    "B905", # zip() without strict= for pairwise vertex walks
+]
