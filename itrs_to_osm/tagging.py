@@ -36,7 +36,6 @@ LEVEL_COLORS = {
     5: "#f68b1f",
 }
 COLOR_UNMATCHED = "#595959"
-COLOR_BIKE_ONLY = "#ffeb33"
 
 
 def level_name(key: str, value: int | str) -> str:

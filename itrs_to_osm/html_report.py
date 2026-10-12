@@ -6,10 +6,10 @@ Foundation's standard tiles need an HTTP Referer, which a page opened from
 file:// never sends, so they come back as the "Blocked" tile; CyclOSM
 (hosted by OpenStreetMap France) serves without one and renders mtb:scale,
 which suits a trail review. The map shows the
-ITRS track as a thin dashed line, each tagged way piece in the official ITRS
-color for its technical difficulty, unmatched segments in grey, paved-road
-segments in the ITRS road purple, and bike-only segments with a yellow
-outline. Geometry goes into the page as a JSON literal.
+ITRS track as a thin dashed line and each OSM way piece that received tags
+as a thick line in the official ITRS color for its technical difficulty.
+Unmatched segments of the track are grey and paved-road segments are the
+ITRS road purple. Geometry goes into the page as a JSON literal.
 """
 
 from __future__ import annotations
@@ -43,7 +43,6 @@ from .report import (
     way_ref,
 )
 from .tagging import (
-    COLOR_BIKE_ONLY,
     COLOR_UNMATCHED,
     EXPOSURE_KEY,
     LEVEL_COLORS,
@@ -152,7 +151,6 @@ def _tech_color(tags: dict[str, str]) -> str:
 
 def map_data(ctx: RunContext) -> dict[str, Any]:
     """Lines (in draw order) and points for the Leaflet map, plus bounds."""
-    outlines: list[dict[str, Any]] = []  # bike-only highlight, drawn first
     pieces: list[dict[str, Any]] = []
     tracks: list[dict[str, Any]] = []
     points: list[dict[str, Any]] = []
@@ -221,14 +219,6 @@ def map_data(ctx: RunContext) -> dict[str, Any]:
                 *sm.reasons,
             ]
             popup = _popup(segment_label(tm.track, seg), lines)
-            if seg.is_bike_only:
-                outlines.append(
-                    {
-                        "coords": coords,
-                        "style": {"color": COLOR_BIKE_ONLY, "weight": 13, "opacity": 0.6},
-                        "popup": popup,
-                    }
-                )
             if status == "unmatched":
                 style = {"color": COLOR_UNMATCHED, "weight": 4, "opacity": 0.9}
             elif seg.is_paved_road:
@@ -258,22 +248,36 @@ def map_data(ctx: RunContext) -> dict[str, Any]:
             lons.append(pt.lon)
 
     bounds = [[min(lats), min(lons)], [max(lats), max(lons)]] if lats else None
-    return {"lines": outlines + pieces + tracks, "points": points, "bounds": bounds}
+    return {"lines": pieces + tracks, "points": points, "bounds": bounds}
 
 
 def _legend() -> str:
-    rows = [(LEVEL_COLORS[v], f"{v} {TECH_NAMES[v]}", "") for v in sorted(TECH_NAMES)]
-    rows += [
-        (COLOR_NOT_RATED, "Road, or tech not rated", ""),
-        (COLOR_UNMATCHED, "Unmatched segment or refused way", ""),
-        (COLOR_BIKE_ONLY, "Bike-only segment (outline)", ""),
-        (COLOR_TRACK, "ITRS track", "dashed"),
+    """Two groups: the surveyed ITRS track (thin) and the OSM ways the tool tagged (thick)."""
+    track_rows = [
+        (COLOR_TRACK, "Surveyed segment", "dashed"),
+        (COLOR_NOT_RATED, "Paved road segment (not tagged)", "thin"),
+        (COLOR_UNMATCHED, "Unmatched segment (not tagged)", "thin"),
     ]
-    items = "".join(
-        f'<div><span class="swatch {cls}" style="background:{_e(color)}"></span>{_e(label)}</div>'
-        for color, label, cls in rows
+    way_rows = [(LEVEL_COLORS[v], f"Tech {v} {TECH_NAMES[v]}", "") for v in sorted(TECH_NAMES)]
+    way_rows += [
+        (COLOR_NOT_RATED, "Exposure only (tech not rated)", ""),
+        (COLOR_UNMATCHED, "Refused (existing value differs)", "dotted"),
+    ]
+
+    def group(title: str, rows: list[tuple[str, str, str]]) -> str:
+        items = "".join(
+            f'<div><span class="swatch {cls}" style="background:{_e(color)}"></span>{_e(label)}</div>'
+            for color, label, cls in rows
+        )
+        return f"<b>{_e(title)}</b>{items}"
+
+    return (
+        '<div class="legend">'
+        + group("ITRS track (as surveyed)", track_rows)
+        + '<div class="gap"></div>'
+        + group("OSM ways with tags applied", way_rows)
+        + "</div>"
     )
-    return f'<div class="legend"><b>Technical difficulty</b>{items}</div>'
 
 
 def _script_json(value: Any) -> str:
@@ -324,9 +328,12 @@ pre { background: #f6f6f6; border: 1px solid #ddd; padding: 8px; overflow-x: aut
 code { background: #f3f3f3; padding: 0 3px; }
 .legend { background: #fff; padding: 6px 8px; border-radius: 4px; font-size: 12px;
   line-height: 1.6; box-shadow: 0 1px 4px rgba(0,0,0,0.3); }
-.swatch { display: inline-block; width: 18px; height: 4px; margin-right: 6px;
+.swatch { display: inline-block; width: 18px; height: 5px; margin-right: 6px;
   vertical-align: middle; }
+.swatch.thin { height: 3px; }
 .swatch.dashed { height: 0; background: none !important; border-top: 2px dashed #555; }
+.swatch.dotted { height: 0; background: none !important; border-top: 5px dotted #595959; }
+.legend .gap { height: 6px; }
 """
 
 

@@ -525,3 +525,8 @@ building against the real tracks:
   serve without a Referer and render mtb:scale. The Advisories preamble
   about what the tool doesn't edit was removed at Steve's request: the
   report says what was done, not what wasn't.
+- 2026-Oct-12: the map's yellow bike-only outline is gone; it said nothing
+  about the tags being applied. The legend now has two groups so the two
+  kinds of line read apart: "ITRS track (as surveyed)" for the thin dashed
+  track, its paved-road and unmatched segments, and "OSM ways with tags
+  applied" for the thick pieces colored by technical difficulty.
