@@ -232,9 +232,11 @@ def _header(ctx: RunContext) -> list[Block]:
         f"snap {co.snap_m:g} m, snap to junction {co.snap_junction_m:g} m, "
         f"min piece {co.min_piece_m:g} m, force {'on' if co.force else 'off'}"
     )
+    exports = ", ".join(Path(t.source).name for t in ctx.tracks) or "none"
     items: list[Inline] = [
         ["Generated: ", ctx.generated_at],
         ["Tool: itrs-to-osm ", ctx.tool_version],
+        ["ITRS data: ", exports],
         ["OSM data: ", source],
         ["Output: ", output],
         ["Thresholds: ", thresholds],
@@ -266,8 +268,8 @@ def _summary(ctx: RunContext) -> list[Block]:
         lines.append(
             [
                 Strong(t.name),
-                f": ITRS {versions}, surveyed {dates}, exported {t.export_date or 'unknown'}, "
-                f"{len(t.segments)} segments, {length:.0f} m",
+                f": ITRS export from app version {versions}, surveyed {dates}, exported "
+                f"{t.export_date or 'unknown'}, {len(t.segments)} segments, {length:.0f} m",
             ]
         )
     blocks.append(ItemList(lines))
@@ -276,13 +278,13 @@ def _summary(ctx: RunContext) -> list[Block]:
     r = ctx.result
     split = sum(w.status == "split" for w in r.ways)
     totals: list[Inline] = [
-        f"Segments: {statuses.count('matched')} matched, {statuses.count('partial')} partial, "
-        f"{statuses.count('unmatched')} unmatched, {statuses.count('not applied')} not applied "
-        "(paved road or nothing rated)",
-        f"Ways modified: {len(r.modified_ways)} ({split} split)",
+        f"ITRS segments: {statuses.count('matched')} matched, {statuses.count('partial')} "
+        f"partial, {statuses.count('unmatched')} unmatched, {statuses.count('not applied')} "
+        "not applied (paved road or nothing rated)",
+        f"OSM ways modified: {len(r.modified_ways)} ({split} split)",
         f"New ways from splits: {r.ways_added}",
-        f"Nodes added: {r.nodes_added}",
-        f"Relations updated: {r.relations_modified}",
+        f"OSM nodes added: {r.nodes_added}",
+        f"OSM relations updated: {r.relations_modified}",
         f"Refusals: {len(r.refusals)}",
     ]
     blocks.append(Para(Strong("Totals:")))
@@ -304,10 +306,10 @@ def _summary(ctx: RunContext) -> list[Block]:
 def _changeset(ctx: RunContext) -> list[Block]:
     comment, source = changeset_suggestion(ctx)
     return [
-        Heading(2, "Suggested changeset tags"),
+        Heading(2, "Changeset tags"),
         Para(
-            "Paste these into the changeset tags in JOSM's upload dialog. Provenance belongs "
-            "in the changeset, not on the objects, so no source tag is added to anything edited."
+            "Paste these into the changeset tags in JOSM's upload dialog. They carry the "
+            "provenance for the edit."
         ),
         CodeBlock(f"comment={comment}\nsource={source}"),
     ]
@@ -331,7 +333,15 @@ def _name_match(tm: TrackMatch) -> Inline:
 
 def _track_section(ctx: RunContext, tm: TrackMatch) -> list[Block]:
     t = tm.track
-    blocks: list[Block] = [Heading(2, f"Track: {t.name}")]
+    blocks: list[Block] = [
+        Heading(2, f"ITRS track: {t.name}"),
+        Para(
+            "Segment, Tech, Exposure, Type, Use, Direction and Length come from the ITRS "
+            "export. Match, OSM way(s) and Offset are this tool's result: which OSM way "
+            "each surveyed segment landed on, and how far the surveyed line sits from it "
+            "(90th percentile)."
+        ),
+    ]
     rows: list[list[Inline]] = []
     for sm in tm.segments:
         s = sm.segment
@@ -363,7 +373,7 @@ def _track_section(ctx: RunContext, tm: TrackMatch) -> list[Block]:
                 "Use",
                 "Direction",
                 "Length",
-                "Status",
+                "Match",
                 "OSM way(s)",
                 "Offset p90",
             ],
@@ -395,7 +405,15 @@ def _cut_text(cut: Any) -> str:
 
 
 def _ways_section(ctx: RunContext) -> list[Block]:
-    blocks: list[Block] = [Heading(2, "Ways")]
+    blocks: list[Block] = [
+        Heading(2, "OSM ways changed"),
+        Para(
+            "One entry per OSM way this tool edited. The name, highway tag and length are "
+            "OSM's. The cuts are split points this tool chose on the way, and each piece "
+            "lists the ITRS tags OSM had before and the tags the output file carries after, "
+            "with the ITRS segments the rating came from."
+        ),
+    ]
     if not ctx.result.ways:
         blocks.append(Para("No way received a rating."))
         return blocks
@@ -431,9 +449,9 @@ def _ways_section(ctx: RunContext) -> list[Block]:
                         "From",
                         "To",
                         "Nodes",
-                        "Tags before",
+                        "OSM tags before",
                         "Tags after",
-                        "From segments",
+                        "From ITRS segments",
                     ],
                     rows,
                 )
@@ -482,13 +500,18 @@ def _not_applied(ctx: RunContext) -> list[Block]:
                 continue
             for iv in sm.dropped:
                 if iv.length < mo.min_piece_m:
-                    why = f"shorter than the {mo.min_piece_m:g} m minimum piece"
+                    why = f"it is shorter than the {mo.min_piece_m:g} m minimum piece"
                 else:
                     why = (
-                        f"90th percentile offset {iv.p90_offset:.1f} m exceeds "
+                        f"its 90th percentile offset of {iv.p90_offset:.1f} m exceeds "
                         f"{mo.max_offset_m:g} m"
                     )
-                lines.append(f"{label}: {iv.length:.0f} m on {way_ref(iv.way_id)} dropped ({why})")
+                applied = ", ".join(_way_title(ctx, w) for w in sm.way_ids)
+                lines.append(
+                    f"{label}: the {iv.place} {iv.length:.0f} m of this {segment_length(seg):.0f} m "
+                    f"segment ran onto {_way_title(ctx, iv.way_id)}. That stretch stays "
+                    f"untagged because {why}. The rest of the segment was applied to {applied}."
+                )
             if sm.unmatched_vertices:
                 lines.append(
                     f"{label}: {sm.unmatched_vertices} of {sm.total_vertices} vertices "
@@ -510,7 +533,11 @@ def _not_applied(ctx: RunContext) -> list[Block]:
         for n in w.notes:
             if "longer claim wins" in n:
                 lines.append(f"{way_ref(w.way_id)}: {n}")
-    return [Heading(2, "Not applied"), ItemList(lines) if lines else Para("Nothing.")]
+    return [
+        Heading(2, "Not applied"),
+        Para("ITRS data that produced no OSM edit, and why."),
+        ItemList(lines) if lines else Para("Nothing."),
+    ]
 
 
 def _overwritten(ctx: RunContext) -> list[Inline]:
@@ -660,7 +687,10 @@ def _rating_points(ctx: RunContext) -> list[Block]:
 
 
 def _advisories(ctx: RunContext) -> list[Block]:
-    blocks: list[Block] = [Heading(2, "Advisories")]
+    blocks: list[Block] = [
+        Heading(2, "Advisories"),
+        Para("Where the ITRS survey and the OSM data disagree, with the ITRS detail behind it."),
+    ]
     for title, lines in (
         ("Existing ITRS values overwritten", _overwritten(ctx)),
         ("Direction", _direction_mismatches(ctx)),
@@ -668,7 +698,7 @@ def _advisories(ctx: RunContext) -> list[Block]:
     ):
         blocks.append(Heading(3, title))
         blocks.append(ItemList(lines) if lines else Para("None."))
-    blocks.append(Heading(3, "Rating points"))
+    blocks.append(Heading(3, "ITRS rating points"))
     blocks += _rating_points(ctx)
     return blocks
 
@@ -681,14 +711,15 @@ def _review_steps(ctx: RunContext) -> list[Block]:
     steps: list[Inline] = [
         first,
         [
-            "Search (Ctrl+F) for ",
+            "Edit -> Search for ",
             Code("modified"),
             " to select everything this tool changed or created.",
         ],
-        "Run the validator (Shift+V) and fix or explain each warning on the selection.",
-        "Look at each split listed under Ways: the cut nodes, the tags on each piece, and "
-        "the order of the pieces in any relation.",
-        "Paste the suggested changeset tags into the upload dialog.",
+        "Open the validator (Windows -> Validation Results) and click Validate with that "
+        "selection active. Fix or explain each warning.",
+        "Look at each split listed under OSM ways changed: the cut nodes, the tags on each "
+        "piece, and the order of the pieces in any relation.",
+        "Paste the changeset tags listed below into the upload dialog.",
         "Upload. JOSM sends only the modified and new elements; the rest of the file is "
         "context and is not uploaded.",
     ]
@@ -697,13 +728,14 @@ def _review_steps(ctx: RunContext) -> list[Block]:
 
 def build_report(ctx: RunContext) -> list[Block]:
     """The whole report as blocks, in order, for any renderer."""
-    blocks = _header(ctx) + _summary(ctx) + _changeset(ctx)
+    blocks = _header(ctx) + _summary(ctx)
     for tm in ctx.matches:
         blocks += _track_section(ctx, tm)
     blocks += _ways_section(ctx)
     blocks += _not_applied(ctx)
     blocks += _advisories(ctx)
     blocks += _review_steps(ctx)
+    blocks += _changeset(ctx)
     return blocks
 
 

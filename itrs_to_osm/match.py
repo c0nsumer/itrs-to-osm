@@ -131,10 +131,23 @@ class Interval:
     vertices: int
     mean_offset: float
     p90_offset: float
+    at_segment_start: bool = False  # covers the segment's first vertex
+    at_segment_end: bool = False  # covers the segment's last vertex
 
     @property
     def length(self) -> float:
         return self.end - self.start
+
+    @property
+    def place(self) -> str:
+        """Where in its segment this stretch sits: first, last, middle, or whole."""
+        if self.at_segment_start and self.at_segment_end:
+            return "whole"
+        if self.at_segment_start:
+            return "first"
+        if self.at_segment_end:
+            return "last"
+        return "middle"
 
 
 @dataclass
@@ -545,6 +558,8 @@ def _intervals_for_segment(
                 vertices=len(idxs),
                 mean_offset=sum(offsets) / len(offsets),
                 p90_offset=percentile(offsets, 90),
+                at_segment_start=idxs[0] == s,
+                at_segment_end=idxs[-1] == e,
             )
         )
     return intervals, unmatched
@@ -597,14 +612,15 @@ def match_track(track: Track, data: OsmData, options: MatchOptions | None = None
             elif iv.length < options.min_piece_m:
                 sm.dropped.append(iv)
                 sm.reasons.append(
-                    f"{iv.length:.0f} m on way {iv.way_id} dropped (shorter than "
-                    f"{options.min_piece_m:.0f} m)"
+                    f"{iv.place} {iv.length:.0f} m ran onto way {iv.way_id}, dropped "
+                    f"(shorter than {options.min_piece_m:.0f} m)"
                 )
             elif iv.p90_offset > options.max_offset_m:
                 sm.dropped.append(iv)
                 sm.reasons.append(
-                    f"{iv.length:.0f} m on way {iv.way_id} dropped (90th percentile offset "
-                    f"{iv.p90_offset:.1f} m exceeds {options.max_offset_m:.0f} m)"
+                    f"{iv.place} {iv.length:.0f} m ran onto way {iv.way_id}, dropped "
+                    f"(90th percentile offset {iv.p90_offset:.1f} m exceeds "
+                    f"{options.max_offset_m:.0f} m)"
                 )
             else:
                 sm.intervals.append(iv)

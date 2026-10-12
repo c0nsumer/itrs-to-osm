@@ -530,3 +530,12 @@ building against the real tracks:
   kinds of line read apart: "ITRS track (as surveyed)" for the thin dashed
   track, its paved-road and unmatched segments, and "OSM ways with tags
   applied" for the thick pieces colored by technical difficulty.
+- 2026-Oct-12: report wording pass after Steve's first read. Sections say
+  where their data comes from ("ITRS track", "OSM ways changed", "ITRS
+  rating points", an "ITRS data" line in the header, and a lead sentence per
+  section naming the ITRS columns, the OSM columns, and what the tool
+  computed). A dropped tail now reads "the last 13 m of this 60 m segment
+  ran onto w... That stretch stays untagged because ... The rest of the
+  segment was applied to w...". The JOSM steps use menu paths instead of
+  Windows key combos, and the changeset tags moved to the end, after the
+  review steps that use them.

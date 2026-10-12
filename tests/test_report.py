@@ -20,12 +20,12 @@ from itrs_to_osm.tagging import EXPOSURE_KEY, TECH_KEY
 SECTIONS = [
     "# itrs-to-osm report",
     "## Summary",
-    "## Suggested changeset tags",
-    "## Track: Test Trail",
-    "## Ways",
+    "## ITRS track: Test Trail",
+    "## OSM ways changed",
     "## Not applied",
     "## Advisories",
     "## How to review in JOSM",
+    "## Changeset tags",
 ]
 
 
@@ -89,7 +89,7 @@ def test_split_way_details(tmp_path):
     assert f"{TECH_KEY}=**3**" in md and f"{EXPOSURE_KEY}=**1**" in md
     assert "| 2 (Intermediate) | 1 (Normal injury risk) |" in md
     assert f"| w{way} |" in md  # the segment table's OSM way column
-    assert "Ways modified: 1 (1 split)" in md
+    assert "OSM ways modified: 1 (1 split)" in md
 
 
 def test_changeset_block(tmp_path):
@@ -97,7 +97,7 @@ def test_changeset_block(tmp_path):
     md = markdown(ctx, tmp_path)
     comment, source = changeset_suggestion(ctx)
     assert f"```\ncomment={comment}\nsource={source}\n```" in md
-    assert "upload dialog" in md and "not on the objects" in md
+    assert "upload dialog" in md and "provenance" in md
 
 
 def test_refusal_reported_prominently(tmp_path):
@@ -150,7 +150,10 @@ def test_unmatched_segment_and_dropped_tail(tmp_path):
     ctx, expect = run_ctx("tail_onto_other_way")
     md = markdown(ctx, tmp_path)
     other = expect["ways"]["other"]
-    assert re.search(rf"Test Trail / S002: 1\d m on w{other} dropped \(shorter than", md)
+    assert re.search(
+        rf"Test Trail / S002: the last 1\d m of this \d+ m segment ran onto w{other}", md
+    )
+    assert "stays untagged because it is shorter than the 15 m minimum piece" in md
 
 
 def test_relation_line_and_name_match(tmp_path):
@@ -158,7 +161,7 @@ def test_relation_line_and_name_match(tmp_path):
     md = markdown(ctx, tmp_path)
     rel = expect["relations"]["route"]
     assert f"relation {rel} Test Trail (route): pieces inserted forward" in md
-    assert "Relations updated: 1" in md
+    assert "OSM relations updated: 1" in md
     assert f"by relation {rel} name 'Test Trail'" in md
 
 
@@ -178,10 +181,10 @@ def test_empty_sections_say_none_or_nothing(tmp_path):
 
     ctx, _ = run_ctx("single_way_uniform", edit_export=rate_exposure)
     md = markdown(ctx, tmp_path)
-    assert "## Not applied\n\nNothing." in md
+    assert "## Not applied\n\nITRS data that produced no OSM edit, and why.\n\nNothing." in md
     assert "### Existing ITRS values overwritten\n\nNone." in md
     assert "### Direction\n\nNone." in md
-    assert "### Rating points\n\nNone." in md
+    assert "### ITRS rating points\n\nNone." in md
 
 
 def test_direction_and_use_advisories(tmp_path):
@@ -254,7 +257,7 @@ def add_points(export):
 def test_rating_points_listed(tmp_path):
     ctx, _ = run_ctx("single_way_uniform", edit_export=add_points)
     md = markdown(ctx, tmp_path)
-    points = md[md.index("### Rating points") : md.index("## How to review")]
+    points = md[md.index("### ITRS rating points") : md.index("## How to review")]
     assert "| S001 | Exposure | 3 (Life threatening consequences) |" in points
     assert "width of trail bed cm: 65" in points
     assert "[photo 1](https://example.com/p.jpg?a=1&b=2)" in points
@@ -343,7 +346,13 @@ def test_html_parses_and_has_map(tmp_path):
     assert data["bounds"] and len(data["points"]) == 2
     colors = {line["style"]["color"] for line in data["lines"]}
     assert "#0080c6" in colors and "#ee3124" in colors  # tech 2 and 3 pieces
-    for section in ("Summary", "Track: Test Trail", "Ways", "Not applied", "Advisories"):
+    for section in (
+        "Summary",
+        "ITRS track: Test Trail",
+        "OSM ways changed",
+        "Not applied",
+        "Advisories",
+    ):
         assert f">{section}</h2>" in doc
     assert "<table>" in doc
     rel = expect["relations"]["route"]
