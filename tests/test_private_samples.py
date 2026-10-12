@@ -43,3 +43,39 @@ def test_real_export_parses_cleanly(path):
     )
     for p in track.points:
         assert track.segment_by_uuid(p.segment_uuid) is not None
+
+
+def _cached_area(track):
+    """The cached Overpass download for a track's area, or None (never hits the network)."""
+    from itrs_to_osm.geo import buffer_bbox
+    from itrs_to_osm.overpass import build_query, cache_key
+
+    cache = ROOT / "cache"
+    path = cache / f"{cache_key(build_query(buffer_bbox(track.bbox(), 100.0)))}.osm"
+    return path.read_text(encoding="utf-8") if path.exists() else None
+
+
+@pytest.mark.parametrize("path", SAMPLES, ids=lambda p: p.stem[:40])
+def test_real_export_matches_its_osm_ways(path):
+    from itrs_to_osm.match import match_track
+    from itrs_to_osm.osm import read_osm_xml
+
+    track = load_track(path)
+    xml = _cached_area(track)
+    if xml is None:
+        pytest.skip("no cached Overpass download for this track")
+    result = match_track(track, read_osm_xml(xml))
+    assert result.candidate_count > 0
+    # Every real sample lies on mapped trails: nothing is unmatched, and the
+    # name prior found the trail (exact for two, token overlap for the rest).
+    assert all(sm.status in ("matched", "partial") for sm in result.segments), [
+        (sm.segment.name, sm.status, sm.reasons) for sm in result.segments
+    ]
+    assert result.name_matches
+    # Contiguity survives matching: each segment's interval meets the next.
+    for a, b in zip(result.segments, result.segments[1:]):
+        last, first = a.intervals[-1], b.intervals[0]
+        if last.way_id == first.way_id:
+            joint = last.start if last.reversed else last.end
+            other = first.end if first.reversed else first.start
+            assert abs(joint - other) < 1.0, (a.segment.name, b.segment.name, joint, other)

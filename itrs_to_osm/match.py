@@ -423,6 +423,27 @@ def _intervals_for_segment(
         else:
             groups.append((ci, [i]))
 
+    # A lone boundary vertex (shared with the neighboring segment) sitting on
+    # the neighboring way at a junction is not a tail of this segment; the
+    # adjacent interval extends to that junction instead.
+    def junction_artifact(group: tuple[int, list[int]], neighbor: tuple[int, list[int]]) -> bool:
+        if len(group[1]) != 1:
+            return False
+        at = verts[group[1][0]]
+        return (
+            _connected_near(candidates[group[0]], candidates[neighbor[0]], at, shared_cache)
+            is not None
+        )
+
+    before: _Candidate | None = None
+    after: _Candidate | None = None
+    if len(groups) > 1 and seg_index > 0 and groups[0][1] == [s]:
+        if junction_artifact(groups[0], groups[1]):
+            before = candidates[groups.pop(0)[0]]
+    if len(groups) > 1 and seg_index < len(ranges) - 1 and groups[-1][1] == [e]:
+        if junction_artifact(groups[-1], groups[-2]):
+            after = candidates[groups.pop()[0]]
+
     intervals: list[Interval] = []
     for g, (ci, idxs) in enumerate(groups):
         cand = candidates[ci]
@@ -450,18 +471,24 @@ def _intervals_for_segment(
             if found is None:
                 return
             along, k = found
+            # The junction must be close along the way too, or a shared node
+            # far down a curving way would stretch a short tail into a long one.
+            if abs(along - near) > JUNCTION_REACH_M:
+                return
             if toward_start and along < a0:
                 a0, p0 = along, (k, 0.0)
             elif not toward_start and along > a1:
                 a1, p1 = along, way_pos(k, 0.0, cand.edge_count)
 
-        if g > 0:
-            prev = candidates[groups[g - 1][0]]
+        prev = candidates[groups[g - 1][0]] if g > 0 else before
+        if prev is not None:
             extend(cand, prev, verts[idxs[0]], first.along, toward_start=not reverse)
-        if g < len(groups) - 1:
-            nxt = candidates[groups[g + 1][0]]
+        nxt = candidates[groups[g + 1][0]] if g < len(groups) - 1 else after
+        if nxt is not None:
             extend(cand, nxt, verts[idxs[-1]], last.along, toward_start=reverse)
 
+        if a1 - a0 < 1.0 and len(groups) > 1:
+            continue
         intervals.append(
             Interval(
                 way_id=cand.way.id,
@@ -514,18 +541,27 @@ def match_track(track: Track, data: OsmData, options: MatchOptions | None = None
             results.append(sm)
             continue
 
-        # The longest interval always stays; shorter secondary ones below the
-        # minimum piece length are tails or crossing artifacts.
+        # The longest interval always stays. Shorter secondary ones are tails
+        # or crossing artifacts when they're under the minimum piece length or
+        # sit badly off their way.
         longest = max(intervals, key=lambda iv: iv.length)
         for iv in intervals:
-            if iv is longest or iv.length >= options.min_piece_m:
+            if iv is longest:
                 sm.intervals.append(iv)
-            else:
+            elif iv.length < options.min_piece_m:
                 sm.dropped.append(iv)
                 sm.reasons.append(
                     f"{iv.length:.0f} m on way {iv.way_id} dropped (shorter than "
                     f"{options.min_piece_m:.0f} m)"
                 )
+            elif iv.p90_offset > options.max_offset_m:
+                sm.dropped.append(iv)
+                sm.reasons.append(
+                    f"{iv.length:.0f} m on way {iv.way_id} dropped (90th percentile offset "
+                    f"{iv.p90_offset:.1f} m exceeds {options.max_offset_m:.0f} m)"
+                )
+            else:
+                sm.intervals.append(iv)
         if sm.unmatched_vertices:
             sm.reasons.append(
                 f"{sm.unmatched_vertices} of {sm.total_vertices} vertices off-network"
