@@ -7,10 +7,10 @@ but the surveyed track never lines up exactly with the OSM way, one way
 often spans a dozen segments with different ratings, and copying it all over
 by hand means splitting ways and typing tags for an afternoon.
 
-This tool does the mechanical part. It finds the OSM ways under the surveyed
+This tool does the mechanical part without doing mechanical edits. It finds the OSM ways under the surveyed
 track, splits them where the rating changes, writes the ITRS tags, and hands
-you a JOSM file plus a report. You review it in JOSM and upload it yourself.
-It never talks to the OSM API.
+you a JOSM file plus a report. You (a human) reviews the output, the data in in JOSM and then uploads it.
+This keeps a human in the loop.
 
 As of this writing (2026-Oct-12) it handles exports from ITRS app versions
 4.4 through 5.3 and writes these two tags:
