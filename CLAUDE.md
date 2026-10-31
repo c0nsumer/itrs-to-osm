@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-In development, milestone by milestone per `PLAN.md` (the reviewed design; follow it). `project_startup.txt` is the original project brief. Milestones 1-6 are done (scaffold, parser, Overpass/OSM layer, matching, cutting, Markdown and HTML reports, README), an independent review's findings are fixed, and the user has made real OSM edits with the output (2026-Oct-12). Next: incorporate feedback from ITRS and the Copper Harbor Trails Club, then release prep (milestone 7) when the user says so. Keep the "Commands" and "Architecture" sections below current as modules land.
+In development, milestone by milestone per `PLAN.md` (the reviewed design; follow it). `research/project_startup.txt` is the original project brief (private, gitignored). Milestones 1-6 are done (scaffold, parser, Overpass/OSM layer, matching, cutting, Markdown and HTML reports, README), an independent review's findings are fixed, and the user has made real OSM edits with the output (2026-Oct-12). Next: incorporate feedback from ITRS and the Copper Harbor Trails Club, then release prep (milestone 7) when the user says so. Keep the "Commands" and "Architecture" sections below current as modules land.
 
 ## Commands
 
@@ -22,8 +22,8 @@ ruff check itrs_to_osm tests
 ruff format itrs_to_osm tests
 
 # Run the tool (writes <name>.osm and <name>.report.md next to the input; --html adds a map page)
-itrs-to-osm "geojson-export_Loam Rider.geojson" --out-dir out
-itrs-to-osm geojson-export_*.geojson --out copper-harbor --out-dir out   # one .osm for a batch
+itrs-to-osm "research/exports/geojson-export_Loam Rider.geojson" --out-dir research/output
+itrs-to-osm research/exports/*.geojson --out copper-harbor --out-dir research/output   # one .osm for a batch
 itrs-to-osm export.geojson --osm area.osm --dry-run                        # offline, report only
 ```
 
@@ -39,4 +39,5 @@ Pipeline (`cli.py` -> `run`): parse exports -> buffered bbox per export, overlap
 - `split.py`: claims -> zones (same-track same-tag claims merge first; longer claim wins overlaps) -> cuts (junction within `--snap-junction`, else node within `--snap`, else inserted node on the way geometry) -> JOSM-style split (most nodes keeps the id, tags copied) -> tags per piece -> relation members inserted next to the original with JOSM's direction logic. Refuses a way whose existing ITRS value differs unless `--force`.
 - `tagging.py`: the two keys, value ranges, level names, official ITRS colors, `target_tags` (never for paved roads, never 0).
 - `report.py` / `html_report.py`: `RunContext` -> Markdown / HTML (Leaflet map).
-- `tests/conftest.py` + `tests/fixtures/builder.py`: synthesize ITRS exports and OSM networks; `SCENARIOS` carries ground truth for eleven edge cases. Never commit a real export. `tests/test_private_samples.py` runs on the gitignored real files and cached downloads when present.
+- `tests/conftest.py` + `tests/fixtures/builder.py`: synthesize ITRS exports and OSM networks; `SCENARIOS` carries ground truth for eleven edge cases. Never commit a real export. `tests/test_private_samples.py` runs on the gitignored real exports in `research/exports/` and cached downloads when present.
+- `research/`: local-only private material (real exports, ITRS docs and QGIS assets, the brief, run output). Gitignored except `research/README.md`; never commit anything else from it.

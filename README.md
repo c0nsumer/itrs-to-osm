@@ -117,9 +117,9 @@ python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
 
 The tests run offline on synthesized trails and OSM networks
 (`tests/fixtures/builder.py` has eleven scenarios with ground truth, each
-modeled on a real case). Real ITRS exports are private and never committed;
-when some are present locally, `tests/test_private_samples.py` runs on them
-too.
+modeled on a real case). Real ITRS exports are private and never committed.
+If some are present in `research/exports/`, `tests/test_private_samples.py`
+runs on them too. `research/README.md` describes that directory.
 
 ## Thanks
 

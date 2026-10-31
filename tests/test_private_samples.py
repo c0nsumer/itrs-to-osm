@@ -1,7 +1,7 @@
-"""Checks against the real ITRS exports, which live outside the repo.
+"""Checks against the real ITRS exports in research/exports/.
 
 The files are gitignored private reference material. When none are present
-(a fresh public checkout), every test here is skipped.
+(a fresh checkout), every test here is skipped.
 """
 
 from __future__ import annotations
@@ -13,9 +13,7 @@ import pytest
 from itrs_to_osm.itrs import EXPOSURE_RATINGS, TECH_RATINGS, load_track
 
 ROOT = Path(__file__).resolve().parent.parent
-SAMPLES = sorted(ROOT.glob("geojson-export_*.geojson")) + sorted(
-    (ROOT / "tests" / "private").glob("*.geojson")
-)
+SAMPLES = sorted((ROOT / "research" / "exports").glob("*.geojson"))
 
 pytestmark = pytest.mark.skipif(not SAMPLES, reason="no private ITRS samples present")
 

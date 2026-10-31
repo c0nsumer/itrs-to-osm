@@ -76,8 +76,8 @@ Things that will bite a naive "nearest way" approach:
   Rider from 5 to 3, On the Edge from 3 to 1.
 
 The ITRS document "ITRS rating data explanation" (Crumbach and Melchiori,
-February 2026, kept locally and out of the repo) answers what 0 means. Page 9
-translates every rating value (technical difficulty, exposure, river
+February 2026, available for download from itrs.bike) answers what 0 means.
+Page 9 translates every rating value (technical difficulty, exposure, river
 crossing) as: 0 = Not rated, 1 = Green, 2 = Blue, 3 = Red, 4 = Black,
 5 = Orange. So Loam Rider's `segment_max_exposure: 0` on every segment means
 exposure was never assessed there, which also explains why its track-level
@@ -98,7 +98,8 @@ Other facts from that document worth designing around:
   The HTML report map will.
 
 The ITRS QGIS assets (palette, QML layer styles, icons, and two QGIS helper
-scripts; also kept locally and out of the repo) fill in the details:
+scripts; provided directly by ITRS, not published on itrs.bike) fill in the
+details:
 
 - Palette: 1 green `#72bf44`, 2 blue `#0080c6`, 3 red `#ee3124`, 4 black
   `#000000`, 5 orange `#f68b1f`. Roads are purple `#844c82`, grey `#595959`
@@ -394,7 +395,7 @@ itrs_to_osm/
   report.py     Markdown (and later HTML) output
 tests/
   fixtures/     synthesized ITRS exports and small hand-built .osm networks
-  private/      gitignored; the real exports, used when present
+research/       gitignored except its README; real exports, ITRS docs, run output
 ```
 
 Install for users: `pipx install git+https://github.com/c0nsumer/itrs-to-osm`
@@ -423,8 +424,9 @@ synthesized data:
   tags overwritten and recorded; relation membership updated with correct
   order; longest piece keeps the id; 4.4 and 5.x field names; 0 values;
   cached Overpass response reused; round-trip of an unchanged `.osm`.
-- `tests/private/` runs the four real exports against cached Overpass
-  responses when the files exist, and skips otherwise.
+- `tests/test_private_samples.py` runs the real exports in
+  `research/exports/` against cached Overpass responses when the files
+  exist, and skips otherwise.
 
 Every stage also gets checked by opening the output in JOSM.
 
@@ -477,8 +479,14 @@ first two reuse it.
 - ITRS: https://itrs.bike/overview/, https://itrs.bike/technical-difficulty/,
   https://itrs.bike/exposure/, "ITRS rating data explanation"
   (M. Crumbach, E. Melchiori, February 2026), and the ITRS QGIS assets
-  (palette, QML styles, icons, scripts). Both are local copies, not in the
-  repo.
+  (palette, QML styles, icons, scripts). The PDF is available for download
+  from itrs.bike (https://itrs.bike/downloads/), and downloading it means
+  accepting the ITRS licensing conditions
+  (https://itrs.bike/licensing-conditions/, CC BY-NC-ND 4.0 with CC+). So
+  it isn't in the repo; if you want it, download it yourself and put it in
+  `research/itrs-docs/`. The QGIS assets were provided directly by ITRS and
+  aren't published; the facts this project uses from them are summarized
+  above.
 - OSM wiki: Key:mtb:scale:imba, JOSM file format, Overpass API and Overpass
   QL (`out meta`, `around`, `<` and `>`), API v0.6 (version required on
   modify), Automated Edits code of conduct

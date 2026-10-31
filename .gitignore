@@ -1,12 +1,20 @@
-# Private reference material: the original project brief, the ITRS schema
-# notes, the ITRS rating data explanation PDF, and the sample ITRS exports
-# provided by trail raters. Keep local.
-project_startup.txt
-itrs_osm_schema.csv
+# Local research: private reference material (the project brief, ITRS
+# documents and QGIS assets, real ITRS exports) and output from real runs.
+# Only research/README.md is committed.
+research/*
+!research/README.md
+
+# Belt and braces: real exports, tool output, and private reference files
+# never get committed, wherever they land.
+*.geojson
+*.osm
+*.report.md
+*.report.html
 *.pdf
 *.zip
-geojson-export_*.geojson
-tests/private/
+project_startup.txt
+itrs_osm_schema.csv
+in/
 
 # Python
 __pycache__/
