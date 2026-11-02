@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "itrs-to-osm"
-version = "0.1.0.dev0"
+version = "0.2.0.dev0"
 description = "Copy ITRS mountain bike trail ratings from a rater's GeoJSON export onto OpenStreetMap ways, for review in JOSM"
 readme = "README.md"
 requires-python = ">=3.11"
