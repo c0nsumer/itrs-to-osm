@@ -359,10 +359,19 @@ def _place_cut(
         k = best_node[1]
         return Cut(requested_m, cum[k], "node", way.nodes[k], k)
 
-    # Insert a new node on the way's own geometry at the requested chainage.
-    k = max(i for i in range(len(cum) - 1) if cum[i] <= requested_m)
+    node, index = insert_node_at(data, way, cum, requested_m)
+    return Cut(requested_m, requested_m, "inserted", node.id, index)
+
+
+def insert_node_at(data: OsmData, way: Way, cum: list[float], along_m: float) -> tuple[Node, int]:
+    """Insert a new node on the way's own geometry at chainage ``along_m``.
+
+    Returns the node and its index in ``way.nodes``. The caller marks the
+    way modified when it isn't going to be split or retagged anyway.
+    """
+    k = max(i for i in range(len(cum) - 1) if cum[i] <= along_m)
     span = cum[k + 1] - cum[k]
-    t = 0.0 if span == 0.0 else (requested_m - cum[k]) / span
+    t = 0.0 if span == 0.0 else min(1.0, (along_m - cum[k]) / span)
     a = data.nodes[way.nodes[k]]
     b = data.nodes[way.nodes[k + 1]]
     node = Node(
@@ -374,7 +383,7 @@ def _place_cut(
     nodes = list(way.nodes)
     nodes.insert(k + 1, node.id)
     data.set_way_nodes(way, nodes)
-    return Cut(requested_m, requested_m, "inserted", node.id, k + 1)
+    return node, k + 1
 
 
 def _way_direction(data: OsmData, relation: Relation, index: int, first: int, last: int) -> str:

@@ -9,7 +9,7 @@ from fixtures.builder import SCENARIOS
 
 from itrs_to_osm.cli import EXIT_ERROR, EXIT_OK, EXIT_REFUSED, main
 from itrs_to_osm.osm import read_osm_file
-from itrs_to_osm.tagging import TECH_KEY, existing_itrs
+from itrs_to_osm.tagging import EXPOSURE_KEY, TECH_KEY, existing_itrs
 
 
 def write_scenario(tmp_path, name, *, stem="geojson-export_Test Trail"):
@@ -92,5 +92,42 @@ def test_way_id_restriction_flag(tmp_path):
 def test_every_scenario_runs_through_the_cli(tmp_path, name):
     osm, geojson, expect = write_scenario(tmp_path, name)
     rc = main([str(geojson), "--osm", str(osm)])
-    assert rc == (EXIT_REFUSED if expect["refused"] else EXIT_OK)
+    point_refused = any(p["status"] == "refused" for p in expect.get("exposure_nodes", []))
+    assert rc == (EXIT_REFUSED if expect["refused"] or point_refused else EXIT_OK)
     assert (tmp_path / "Test Trail.osm").exists()
+
+
+def test_exposure_min_out_of_range_is_an_error(tmp_path, capsys):
+    osm, geojson, _ = write_scenario(tmp_path, "boundary_near_existing_node")
+    assert main([str(geojson), "--osm", str(osm), "--exposure-min", "7"]) == EXIT_ERROR
+    assert "--exposure-min" in capsys.readouterr().err
+    assert not (tmp_path / "Test Trail.osm").exists()
+
+
+def test_exposure_nodes_summary_and_switch(tmp_path, capsys):
+    osm, geojson, _ = write_scenario(tmp_path, "boundary_near_existing_node")
+    assert main([str(geojson), "--osm", str(osm)]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "1 exposure node(s) tagged" in out
+    data = read_osm_file(tmp_path / "Test Trail.osm")
+    assert [n.tags for n in data.nodes.values() if EXPOSURE_KEY in n.tags] == [{EXPOSURE_KEY: "2"}]
+
+    assert main([str(geojson), "--osm", str(osm), "--no-exposure-nodes"]) == EXIT_OK
+    assert "0 exposure node(s) tagged" in capsys.readouterr().out
+    data = read_osm_file(tmp_path / "Test Trail.osm")
+    assert not any(EXPOSURE_KEY in n.tags for n in data.nodes.values())
+
+
+def test_exposure_point_refusal_exits_refused_unless_forced(tmp_path, capsys):
+    osm, geojson, expect = write_scenario(tmp_path, "exposure_points")
+    node = expect["tagged_node_id"]
+    assert main([str(geojson), "--osm", str(osm)]) == EXIT_REFUSED
+    captured = capsys.readouterr()
+    assert "3 exposure node(s) tagged" in captured.out
+    assert "refused: 1" in captured.err
+    data = read_osm_file(tmp_path / "Test Trail.osm")
+    assert data.nodes[node].tags == {EXPOSURE_KEY: "3"} and data.nodes[node].action is None
+    assert main([str(geojson), "--osm", str(osm), "--force"]) == EXIT_OK
+    assert "4 exposure node(s) tagged" in capsys.readouterr().out
+    data = read_osm_file(tmp_path / "Test Trail.osm")
+    assert data.nodes[node].tags == {EXPOSURE_KEY: "2"} and data.nodes[node].action == "modify"

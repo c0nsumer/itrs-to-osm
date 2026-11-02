@@ -149,3 +149,25 @@ def test_class_penalty_table():
     assert class_penalty("Paved/surfaced road", "residential") == 0.0
     assert class_penalty("Paved/surfaced road", "path") == 2.0
     assert class_penalty("", "path") == 0.0
+
+
+def test_vertex_places_one_per_vertex_and_monotonic():
+    result, expect = run("single_way_uniform")
+    trail = expect["ways"]["trail"]
+    (sm,) = result.segments
+    assert len(sm.vertex_places) == len(sm.segment.coords)
+    assert all(p is not None for p in sm.vertex_places)
+    interval_ways = {iv.way_id for iv in sm.intervals}
+    assert interval_ways == {trail}
+    assert all(p.way_id == trail for p in sm.vertex_places)
+    along = [p.along_m for p in sm.vertex_places]
+    assert all(b > a for a, b in zip(along, along[1:])), along
+    assert along[0] == pytest.approx(0.0, abs=TOL_M)
+    assert along[-1] == pytest.approx(400.0, abs=TOL_M)
+    assert max(p.offset_m for p in sm.vertex_places) <= 5.0
+
+
+def test_vertex_places_cover_every_segment():
+    result, _ = run("exposure_points")
+    for sm in result.segments:
+        assert len(sm.vertex_places) == len(sm.segment.coords) == sm.total_vertices

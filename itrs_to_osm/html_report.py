@@ -36,7 +36,12 @@ from .report import (
     Table,
     build_report,
     inline_parts,
+    node_ref,
     piece_ref,
+    piece_title,
+    point_detail_text,
+    point_placement_text,
+    point_status_text,
     rating_text,
     segment_label,
     segment_status,
@@ -45,6 +50,7 @@ from .report import (
 from .tagging import (
     COLOR_UNMATCHED,
     EXPOSURE_KEY,
+    EXPOSURE_NAMES,
     LEVEL_COLORS,
     TECH_KEY,
     TECH_NAMES,
@@ -58,6 +64,7 @@ LEAFLET_CSS_SRI = "sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
 LEAFLET_JS_SRI = "sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
 
 COLOR_TRACK = "#555555"
+COLOR_POINT = "#ffffff"  # an ITRS point this tool wrote nothing for
 COLOR_NOT_RATED = LEVEL_COLORS[NOT_RATED]  # ITRS draws roads and 0 in purple
 
 _e = html.escape
@@ -205,6 +212,7 @@ def map_data(ctx: RunContext) -> dict[str, Any]:
             )
             add_bounds(coords)
 
+    changes = {id(c.point): c for c in ctx.points.changes}
     for tm in ctx.matches:
         for sm in tm.segments:
             seg = sm.segment
@@ -229,30 +237,52 @@ def map_data(ctx: RunContext) -> dict[str, Any]:
         for pt in tm.track.points:
             seg = tm.track.segment_by_uuid(pt.segment_uuid)
             lines = [f"segment {seg.name if seg else pt.segment_name or '?'}"]
-            if pt.value not in ("", None):
-                lines.append(f"value: {pt.value}")
-            if pt.remark:
-                lines.append(f"remark: {pt.remark}")
             photos = "".join(
                 f'<br><a href="{_e(u, quote=True)}" target="_blank" rel="noopener">photo {i}</a>'
                 for i, u in enumerate(pt.photos, 1)
             )
+            lat, lon, color = pt.lat, pt.lon, COLOR_POINT
+            change = changes.get(id(pt))
+            if change is None:
+                if pt.value not in ("", None):
+                    lines.append(f"value: {pt.value}")
+                if pt.remark:
+                    lines.append(f"remark: {pt.remark}")
+            else:
+                value = change.value
+                lines.append(
+                    "exposure: " + (rating_text(EXPOSURE_KEY, value) if value is not None else "?")
+                )
+                node = ctx.data.nodes.get(change.node_id) if change.node_id is not None else None
+                if node is not None and (change.written or change.status == "already"):
+                    lat, lon = node.lat, node.lon
+                    color = LEVEL_COLORS.get(value or 0, COLOR_POINT)
+                if change.node_id is not None:
+                    lines.append(f"node: {node_ref(change.node_id)}")
+                    lines.append(f"placed: {point_placement_text(change)}")
+                if change.way_id is not None:
+                    lines.append(f"way: {piece_title(ctx, change.way_id)}")
+                lines.append(f"status: {point_status_text(change)}")
+                if detail := point_detail_text(pt):
+                    lines.append(f"ITRS: {detail}")
             points.append(
                 {
-                    "lat": pt.lat,
-                    "lon": pt.lon,
+                    "lat": lat,
+                    "lon": lon,
+                    "color": color,
+                    "written": color != COLOR_POINT,
                     "popup": _popup(f"{tm.track.name}: {pt.point_type or 'point'}", lines) + photos,
                 }
             )
-            lats.append(pt.lat)
-            lons.append(pt.lon)
+            lats.append(lat)
+            lons.append(lon)
 
     bounds = [[min(lats), min(lons)], [max(lats), max(lons)]] if lats else None
     return {"lines": pieces + tracks, "points": points, "bounds": bounds}
 
 
 def _legend() -> str:
-    """Two groups: the surveyed ITRS track (thin) and the OSM ways the tool tagged (thick)."""
+    """Three groups: the surveyed ITRS track, the OSM ways tagged, and the nodes tagged."""
     track_rows = [
         (COLOR_TRACK, "Surveyed segment", "dashed"),
         (COLOR_NOT_RATED, "Paved road segment (not tagged)", "thin"),
@@ -263,6 +293,12 @@ def _legend() -> str:
         (COLOR_NOT_RATED, "Exposure only (tech not rated)", ""),
         (COLOR_UNMATCHED, "Refused (existing value differs)", "dotted"),
     ]
+
+    node_rows = [
+        (LEVEL_COLORS[v], f"Exposure {v} {EXPOSURE_NAMES[v]}", "dot")
+        for v in sorted(EXPOSURE_NAMES)
+    ]
+    node_rows.append((COLOR_POINT, "ITRS point (not written)", "dot"))
 
     def group(title: str, rows: list[tuple[str, str, str]]) -> str:
         items = "".join(
@@ -276,6 +312,8 @@ def _legend() -> str:
         + group("ITRS track (as surveyed)", track_rows)
         + '<div class="gap"></div>'
         + group("OSM ways with tags applied", way_rows)
+        + '<div class="gap"></div>'
+        + group("OSM nodes with exposure applied", node_rows)
         + "</div>"
     )
 
@@ -295,7 +333,9 @@ for (const line of MAP_DATA.lines) {
   L.polyline(line.coords, line.style).bindPopup(line.popup).addTo(map);
 }
 for (const p of MAP_DATA.points) {
-  L.circleMarker([p.lat, p.lon], {radius: 6, color: "#222", weight: 1, fillColor: "#fff", fillOpacity: 0.9})
+  L.circleMarker([p.lat, p.lon], p.written
+    ? {radius: 7, color: "#222", weight: 2, fillColor: p.color, fillOpacity: 1}
+    : {radius: 6, color: "#222", weight: 1, fillColor: p.color, fillOpacity: 0.9})
     .bindPopup(p.popup).addTo(map);
 }
 if (MAP_DATA.bounds) {
@@ -333,6 +373,8 @@ code { background: #f3f3f3; padding: 0 3px; }
 .swatch.thin { height: 3px; }
 .swatch.dashed { height: 0; background: none !important; border-top: 2px dashed #555; }
 .swatch.dotted { height: 0; background: none !important; border-top: 5px dotted #595959; }
+.swatch.dot { width: 10px; height: 10px; border-radius: 50%; border: 1px solid #222;
+  margin: 0 10px 0 4px; }
 .legend .gap { height: 6px; }
 """
 

@@ -17,6 +17,7 @@ from typing import Any
 from .itrs import DIRECTION_ONE_WAY, DIRECTION_TWO_WAY, USE_BIKE_ONLY, USE_SHARED, Segment, Track
 from .match import Interval, MatchOptions, SegmentMatch, TrackMatch
 from .osm import OsmData
+from .points import EXPOSURE_TYPE, PointChange, PointOptions, PointsResult
 from .split import ApplyResult, CutOptions, WayChange
 from .tagging import (
     EXPOSURE_KEY,
@@ -33,9 +34,11 @@ class RunContext:
     tracks: list[Track]
     matches: list[TrackMatch]
     result: ApplyResult
+    points: PointsResult
     data: OsmData
     match_options: MatchOptions
     cut_options: CutOptions
+    point_options: PointOptions
     osm_source: str  # "Overpass API" or the local file used
     osm_base: str | None  # replication timestamp of the download, when known
     generated_at: str  # ISO timestamp of this run
@@ -139,6 +142,7 @@ def _join(items: list[Inline], sep: str = ", ") -> list[Any]:
 # --- Small formatting helpers -------------------------------------------------
 
 OSM_WAY_URL = "https://www.openstreetmap.org/way/{}"
+OSM_NODE_URL = "https://www.openstreetmap.org/node/{}"
 FOOT_ALLOWED = frozenset({"yes", "designated", "permissive"})
 # highway values where OSM implies foot access when no foot tag says otherwise
 FOOT_IMPLIED_HIGHWAYS = frozenset({"path", "track", "footway", "pedestrian", "steps"})
@@ -220,6 +224,74 @@ def _segments_by_way(sm: SegmentMatch) -> dict[int, list[Interval]]:
     return out
 
 
+def map_url(lat: float, lon: float) -> str:
+    """openstreetmap.org link centered on a point, with a marker."""
+    return (
+        f"https://www.openstreetmap.org/?mlat={lat:.6f}&mlon={lon:.6f}#map=19/{lat:.6f}/{lon:.6f}"
+    )
+
+
+def node_ref(node_id: int) -> str:
+    """'n123 (existing)' or 'new node' for one this tool inserted."""
+    return "new node" if node_id < 0 else f"n{node_id} (existing)"
+
+
+def point_status_text(change: PointChange) -> str:
+    """What happened to an Exposure point, in a few words."""
+    if change.status == "tagged":
+        return "tagged"
+    if change.status == "already":
+        return "already tagged"
+    if change.status == "overwritten":
+        return f"overwritten (was {change.old})"
+    if change.status == "refused":
+        return f"refused (node has {change.old})"
+    if change.status == "unplaced":
+        return f"not placed: {change.reason}"
+    return f"skipped: {change.reason}" if change.reason else change.status
+
+
+def point_placement_text(change: PointChange) -> str:
+    """How the node was chosen, and how far the point sat from the way."""
+    if change.node_id is None:
+        return "-"
+    if change.kind == "inserted":
+        text = "inserted on the way geometry"
+        if change.moved_m >= 0.05:
+            text += f", {change.moved_m:.1f} m along the way from the matched position"
+    else:
+        text = f"existing node, {change.moved_m:.1f} m along the way from the matched position"
+    return (
+        text + f"; {change.from_point_m:.1f} m from the surveyed point, "
+        f"which sat {change.offset_m:.1f} m off the way"
+    )
+
+
+def point_detail_text(point: Any) -> str:
+    """The ITRS remark and type-specific fields of a rating point, or ''."""
+    parts = [f"remark: {point.remark}"] if point.remark else []
+    if detail := _point_details(point):
+        parts.append(detail)
+    return "; ".join(parts)
+
+
+def piece_title(ctx: RunContext, way_id: int) -> str:
+    """A way or split piece as the 'OSM ways changed' section names it, with its name."""
+    keeps = False
+    for w in ctx.result.ways:
+        for p in w.pieces:
+            if p.way_id == way_id:
+                keeps = p.keeps_id and len(w.pieces) > 1
+    way = ctx.data.ways.get(way_id)
+    name = way.tags.get("name", "") if way else ""
+    ref = piece_ref(way_id, keeps)
+    return f"{ref} {name}" if name else ref
+
+
+def _photo_links(point: Any) -> Inline:
+    return _join([Link(f"photo {i}", u) for i, u in enumerate(point.photos, 1)])
+
+
 # --- Sections -----------------------------------------------------------------
 
 
@@ -241,6 +313,16 @@ def _header(ctx: RunContext) -> list[Block]:
         ["Output: ", output],
         ["Thresholds: ", thresholds],
     ]
+    po = ctx.point_options
+    items.append(
+        [
+            "Exposure nodes: ",
+            f"points rated {po.min_exposure} or worse, snap {po.snap_m:g} m, "
+            f"force {'on' if po.force else 'off'}"
+            if po.enabled
+            else "turned off (--no-exposure-nodes)",
+        ]
+    )
     if mo.name_hint:
         items.append(["Matching pinned to the name: ", mo.name_hint])
     if mo.way_ids:
@@ -276,6 +358,7 @@ def _summary(ctx: RunContext) -> list[Block]:
 
     statuses = [segment_status(sm) for tm in ctx.matches for sm in tm.segments]
     r = ctx.result
+    pts = ctx.points
     split = sum(w.status == "split" for w in r.ways)
     totals: list[Inline] = [
         f"ITRS segments: {statuses.count('matched')} matched, {statuses.count('partial')} "
@@ -283,9 +366,10 @@ def _summary(ctx: RunContext) -> list[Block]:
         "not applied (paved road or nothing rated)",
         f"OSM ways modified: {len(r.modified_ways)} ({split} split)",
         f"New ways from splits: {r.ways_added}",
-        f"OSM nodes added: {r.nodes_added}",
+        f"OSM nodes added: {r.nodes_added + pts.nodes_added}",
         f"OSM relations updated: {r.relations_modified}",
-        f"Refusals: {len(r.refusals)}",
+        _exposure_totals(ctx),
+        f"Refusals: {len(r.refusals) + len(pts.refusals)}",
     ]
     blocks.append(Para(Strong("Totals:")))
     blocks.append(ItemList(totals))
@@ -300,7 +384,36 @@ def _summary(ctx: RunContext) -> list[Block]:
                 )
             )
         )
+    if pts.refusals:
+        nodes = sorted({c.node_id for c in pts.refusals if c.node_id is not None})
+        blocks.append(
+            Para(
+                Strong(
+                    f"{len(pts.refusals)} node(s) already carry a different {EXPOSURE_KEY} "
+                    f"value: {', '.join(f'n{n}' for n in nodes)}. Those nodes were left as "
+                    "they are. Rerun with --force to overwrite them."
+                )
+            )
+        )
     return blocks
+
+
+def _exposure_totals(ctx: RunContext) -> str:
+    if not ctx.point_options.enabled:
+        return "Exposure nodes: turned off (--no-exposure-nodes)"
+    changes = ctx.points.changes
+    written = ctx.points.written
+    inserted = sum(c.kind == "inserted" for c in written)
+    text = f"Exposure nodes tagged: {len(written)} of {len(changes)} ITRS Exposure points"
+    extra = [
+        (inserted, "on nodes inserted for them"),
+        (sum(c.status == "already" for c in changes), "already tagged"),
+        (sum(c.status == "unplaced" for c in changes), "not placed"),
+        (sum(c.status == "skipped" for c in changes), "skipped"),
+        (sum(c.status == "refused" for c in changes), "refused"),
+    ]
+    parts = [f"{n} {words}" for n, words in extra if n]
+    return text + (f" ({', '.join(parts)})" if parts else "")
 
 
 def _changeset(ctx: RunContext) -> list[Block]:
@@ -482,9 +595,107 @@ def _ways_section(ctx: RunContext) -> list[Block]:
                     f"(from {', '.join(r.sources)}); not changed",
                 ]
             )
+        ids = {w.way_id, *(p.way_id for p in w.pieces)}
+        for c in ctx.points.refusals:
+            if c.way_id in ids and c.node_id is not None:
+                items.append(
+                    [
+                        Strong("Refused node: "),
+                        f"n{c.node_id} has {EXPOSURE_KEY}={c.old}, the survey says {c.value} "
+                        f"(from {c.track_name} / {c.segment_name}); not changed",
+                    ]
+                )
         items += [["Note: ", n] for n in w.notes]
         if items:
             blocks.append(ItemList(items))
+    return blocks
+
+
+def _nodes_section(ctx: RunContext) -> list[Block]:
+    po = ctx.point_options
+    blocks: list[Block] = [
+        Heading(2, "OSM nodes changed"),
+        Para(
+            "ITRS Exposure points mark the most exposed sections of a segment. At each one, "
+            f"this tool tags a node on the matched OSM way with {EXPOSURE_KEY}, and the way "
+            "keeps the segment's rating."
+        ),
+    ]
+    if not po.enabled:
+        blocks.append(
+            Para(
+                "This step was turned off with --no-exposure-nodes, so no node was tagged. "
+                "The Exposure points are listed under Advisories instead."
+            )
+        )
+        return blocks
+    if not ctx.points.changes:
+        blocks.append(Para("None."))
+        return blocks
+    blocks.append(
+        Para(
+            "Segment, Exposure, ITRS detail, Photos, and Location come from the ITRS export. "
+            "Node, How placed, Way, and Status are this tool's result: an existing node within "
+            f"{po.snap_m:g} m of the matched position (not a junction, no other tags), else a "
+            "new node on the way, and the piece of the way it sits on after the splits. "
+            f"Points rated below {po.min_exposure} are skipped."
+        )
+    )
+    multi = len(ctx.tracks) > 1
+    for t in ctx.tracks:
+        changes = [c for c in ctx.points.changes if c.track_name == t.name]
+        if not changes:
+            continue
+        order = {s.uuid: s.position for s in t.segments}
+        changes.sort(key=lambda c: order.get(c.point.segment_uuid, 10**9))
+        rows: list[list[Inline]] = []
+        for c in changes:
+            p = c.point
+            node: Inline = "-"
+            if c.node_id is not None:
+                text = node_ref(c.node_id)
+                node = Link(text, OSM_NODE_URL.format(c.node_id)) if c.node_id > 0 else text
+            rows.append(
+                [
+                    c.segment_name,
+                    rating_text(EXPOSURE_KEY, c.value) if c.value is not None else "?",
+                    node,
+                    point_placement_text(c),
+                    piece_title(ctx, c.way_id) if c.way_id is not None else "-",
+                    point_status_text(c),
+                    point_detail_text(p) or "-",
+                    _photo_links(p) or "-",
+                    Link(f"{p.lat:.5f}, {p.lon:.5f}", map_url(p.lat, p.lon)),
+                ]
+            )
+        if multi:
+            blocks.append(Para(Strong(t.name)))
+        blocks.append(
+            Table(
+                [
+                    "Segment",
+                    "Exposure",
+                    "Node",
+                    "How placed",
+                    "Way",
+                    "Status",
+                    "ITRS detail",
+                    "Photos",
+                    "Location",
+                ],
+                rows,
+            )
+        )
+    blocks.append(
+        Para(
+            [
+                "This tool can't remove a node for a point ITRS no longer exports. In JOSM, "
+                "look for stale exposure nodes along these trails (Edit -> Search for ",
+                Code(f'"{EXPOSURE_KEY}"=*'),
+                ") and delete any the survey no longer supports.",
+            ]
+        )
+    )
     return blocks
 
 
@@ -533,6 +744,22 @@ def _not_applied(ctx: RunContext) -> list[Block]:
         for n in w.notes:
             if "longer claim wins" in n:
                 lines.append(f"{way_ref(w.way_id)}: {n}")
+    if not ctx.point_options.enabled:
+        if ctx.points.changes:
+            lines.append(
+                f"{len(ctx.points.changes)} ITRS Exposure point(s): no node tagged, the step "
+                "was turned off (--no-exposure-nodes)"
+            )
+    else:
+        for c in ctx.points.changes:
+            label = f"{c.track_name} / {c.segment_name}: Exposure point"
+            if c.status == "refused":
+                lines.append(
+                    f"{label}: nothing written to n{c.node_id}, existing {EXPOSURE_KEY}={c.old} "
+                    f"differs from the survey's {c.value} (refused)"
+                )
+            elif c.status in ("unplaced", "skipped"):
+                lines.append(f"{label}: {point_status_text(c)}")
     return [
         Heading(2, "Not applied"),
         Para("ITRS data that produced no OSM edit, and why."),
@@ -552,6 +779,12 @@ def _overwritten(ctx: RunContext) -> list[Inline]:
                     f"{ref} ({w.name or 'unnamed'}): {key} {old} -> {new} "
                     f"(from {', '.join(p.sources) or '?'})"
                 )
+    for c in ctx.points.changes:
+        if c.status == "overwritten":
+            out.append(
+                f"node {c.node_id}: {EXPOSURE_KEY} was {c.old}, now {c.value} "
+                f"({c.track_name} / {c.segment_name})"
+            )
     return out
 
 
@@ -655,18 +888,17 @@ def _point_value(point: Any) -> str:
 
 def _rating_points(ctx: RunContext) -> list[Block]:
     blocks: list[Block] = []
+    # Exposure points have their own section, unless that step was turned off.
+    own_section = ctx.point_options.enabled
     for t in ctx.tracks:
-        if not t.points:
+        points = [p for p in t.points if not (own_section and p.point_type == EXPOSURE_TYPE)]
+        if not points:
             continue
         order = {s.uuid: s.position for s in t.segments}
         rows: list[list[Inline]] = []
-        for p in sorted(t.points, key=lambda p: order.get(p.segment_uuid, 10**9)):
+        for p in sorted(points, key=lambda p: order.get(p.segment_uuid, 10**9)):
             seg = t.segment_by_uuid(p.segment_uuid)
-            map_url = (
-                f"https://www.openstreetmap.org/?mlat={p.lat:.6f}&mlon={p.lon:.6f}"
-                f"#map=19/{p.lat:.6f}/{p.lon:.6f}"
-            )
-            photos = _join([Link(f"photo {i}", u) for i, u in enumerate(p.photos, 1)])
+            photos = _photo_links(p)
             rows.append(
                 [
                     seg.name if seg else (p.segment_name or "?"),
@@ -675,7 +907,7 @@ def _rating_points(ctx: RunContext) -> list[Block]:
                     p.remark or "-",
                     _point_details(p) or "-",
                     photos or "-",
-                    Link(f"{p.lat:.5f}, {p.lon:.5f}", map_url),
+                    Link(f"{p.lat:.5f}, {p.lon:.5f}", map_url(p.lat, p.lon)),
                 ]
             )
         if len(ctx.tracks) > 1:
@@ -698,7 +930,16 @@ def _advisories(ctx: RunContext) -> list[Block]:
     ):
         blocks.append(Heading(3, title))
         blocks.append(ItemList(lines) if lines else Para("None."))
-    blocks.append(Heading(3, "ITRS rating points"))
+    blocks.append(Heading(3, "Other ITRS rating points"))
+    blocks.append(
+        Para(
+            "Rating points from the ITRS export other than Exposure (those are under OSM nodes "
+            "changed). This tool writes nothing for them."
+            if ctx.point_options.enabled
+            else "Every rating point from the ITRS export. This tool wrote nothing for them, "
+            "as --no-exposure-nodes was given."
+        )
+    )
     blocks += _rating_points(ctx)
     return blocks
 
@@ -719,6 +960,14 @@ def _review_steps(ctx: RunContext) -> list[Block]:
         "selection active. Fix or explain each warning.",
         "Look at each split listed under OSM ways changed: the cut nodes, the tags on each "
         "piece, and the order of the pieces in any relation.",
+    ]
+    if ctx.points.written:
+        steps.append(
+            "Look at each node listed under OSM nodes changed. It should sit on the trail at "
+            "an exposed spot, not on a junction. If a nearby node already marks the same spot "
+            "from an earlier upload, select both and merge them (Tools -> Merge Nodes)."
+        )
+    steps += [
         "Paste the changeset tags listed below into the upload dialog.",
         "Upload. JOSM sends only the modified and new elements; the rest of the file is "
         "context and is not uploaded.",
@@ -732,6 +981,7 @@ def build_report(ctx: RunContext) -> list[Block]:
     for tm in ctx.matches:
         blocks += _track_section(ctx, tm)
     blocks += _ways_section(ctx)
+    blocks += _nodes_section(ctx)
     blocks += _not_applied(ctx)
     blocks += _advisories(ctx)
     blocks += _review_steps(ctx)

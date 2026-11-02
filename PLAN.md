@@ -331,6 +331,55 @@ Two other ITRS fields are compared with OSM and reported, never acted on:
 These go under advisories in the report so the reviewer can decide in JOSM.
 The tool only ever writes the two ITRS keys.
 
+## Exposure points as nodes
+
+Added 2026-Nov-02, after a request to call out notable spots along rated
+routes. The ITRS track export has no point-level technical rating (the ITF
+and TTF assessments roll up into `segment_tech_rating`), so the only
+difficulty-like points in the data are the Exposure points. ITRS defines a
+segment's exposure as the rating of its most exposed section, and the points
+are those sections. So the way tag stays as the roll-up and each point
+becomes a node on the way with the same key:
+
+- `point_exposure_rating` -> `mtb:scale:itrs:exposure` on a node of the
+  matched way. Same key, same values (1 to 4), same colors. The way keeps
+  its `segment_max_exposure` tag. The wiki page for the key gets `onNode`
+  and one sentence: a node marks a specific exposed section, the way carries
+  the worst section along it.
+- Which points: every exported Exposure point at or above `--exposure-min`
+  (default 2, which is also ITRS's own export threshold, so by default
+  everything exported is written). `--no-exposure-nodes` turns the step
+  off. Other point types (Water, RiverCrossing, RockfallZone, Wildlife,
+  GeneralAssessmentRemark) stay report-only: they have established OSM tags
+  of their own, and there's no sample data yet.
+- Nothing else goes on the node. The length bucket
+  (`point_exposure_length`, text such as "up to 30m long"), trail bed
+  width, off-camber, and photo links stay in the report. The point is a
+  single vertex and the export doesn't say where in the section it sits,
+  so a node is the honest representation; a short way would be a guess.
+- Placement comes from the match, not a nearest-way search. Exposure points
+  sit on a segment vertex, and the Viterbi decode already placed every
+  vertex on a way at a chainage. `SegmentMatch.vertex_places` now exposes
+  that per vertex. A point more than 10 m from any vertex of its segment is
+  projected onto the segment's kept intervals instead. A point whose vertex
+  is off-network, or on a dropped tail, is listed as not placed.
+- The node goes on the piece that holds that chainage after the splits.
+  An existing node within `--snap` (5 m) gets the tag, unless it's a
+  junction (shared with another highway way: ambiguous which trail it
+  belongs to) or already carries other tags (a gate, a guidepost). Otherwise
+  a new node is inserted on the way's own geometry, nudged at least 1 m from
+  an excluded neighbor so no zero-length edge appears.
+- Same conflict policy as ways: a node that already has the key with a
+  different value is refused (exit 2) unless `--force`; equal is "already
+  tagged". Two points landing on one node keep the higher rating and the
+  report says so. The tool can't remove a node for a point ITRS no longer
+  exports; the report tells the reviewer to look for stale ones.
+- Report: a body section "OSM nodes changed" lists every Exposure point
+  with its rating, the node (existing or inserted, how far it moved), the
+  piece it sits on, the ITRS detail, photos, and a map link; points not
+  written say why. The Advisories table keeps the other point types. The
+  HTML map draws placed nodes as markers in the ITRS exposure color.
+
 ## The OSM file
 
 JOSM's `.osm` format, as documented on the wiki:
@@ -443,7 +492,10 @@ Every stage also gets checked by opening the output in JOSM.
    JOSM, including a dev-server upload.
 5. Markdown report, CLI polish, README in the project voice.
 6. HTML report with map (stretch).
-7. Release: squash history, tag v1.0.0, publish as c0nsumer/itrs-to-osm.
+7. Exposure points as tagged nodes (`points.py`), report and map support,
+   fixture scenarios (existing node, inserted node, junction node, dropped
+   tail, existing differing value), wiki wording for `onNode`.
+8. Release: squash history, tag v1.0.0, publish as c0nsumer/itrs-to-osm.
 
 ## Open questions
 
@@ -452,7 +504,8 @@ Settled on 2026-Oct-12:
 1. 0 means "Not rated" (ITRS rating data explanation), so the tool skips
    the tag rather than writing 0. Exposure stays per segment from
    `segment_max_exposure`; the finer-grained exposure points are reported
-   but not used for cuts.
+   but not used for cuts. (Revised 2026-Nov-02: the points now also become
+   tagged nodes; see "Exposure points as nodes". The way tag is unchanged.)
 2. No traceability tag on objects. Provenance goes in the changeset
    `source` and comment, which the report suggests.
 3. Thresholds start at corridor 25 m, max offset 15 m, snap 5 m, snap to
@@ -547,3 +600,15 @@ building against the real tracks:
   segment was applied to w...". The JOSM steps use menu paths instead of
   Windows key combos, and the changeset tags moved to the end, after the
   review steps that use them.
+- 2026-Nov-02: milestone 7, exposure points as nodes (see the section of
+  that name). Prompted by a request to call out notable spots along rated
+  routes. The ITRS export has no point-level technical rating, so the
+  Exposure points are what there is, and they map cleanly: way = worst
+  section, node = the section. Checked against the GeoJSON schema in the
+  ITRS rating data explanation (pp. 9, 10, 28): `point_exposure_length` is a
+  text bucket, not meters, which is why a node rather than a short way. In
+  the three real exports with points, 28 of 30 landed on an existing OSM node
+  within 5 m (the Copper Harbor and Visp trails are densely noded); 2 were
+  inserted. The matcher now exposes `vertex_places`, and `split.insert_node_at`
+  is shared by cuts and points. The wiki draft for the exposure key gained
+  `onNode=yes` and two sentences on what a node means (Steve uploads).

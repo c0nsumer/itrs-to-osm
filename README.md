@@ -12,16 +12,29 @@ track, splits them where the rating changes, writes the ITRS tags, and hands
 you a JOSM file plus a report. You (a human) reviews the output, the data in in JOSM and then uploads it.
 This keeps a human in the loop.
 
-As of this writing (2026-Oct-12) it handles exports from ITRS app versions
-4.4 through 5.3 and writes these two tags:
+As of this writing (2026-Nov-02) it handles exports from ITRS app versions
+4.4 through 5.3 and writes these two tags on ways:
 
 - `segment_tech_rating` -> `mtb:scale:itrs:technical_difficulty` (1 to 5)
 - `segment_max_exposure` -> `mtb:scale:itrs:exposure` (1 to 4)
 
+It also writes one tag on nodes. An ITRS export carries an Exposure point
+for each exposed section rated blue or worse (the section that gives the
+segment its exposure rating). The tool tags a node of the matched way at
+each one:
+
+- `point_exposure_rating` -> `mtb:scale:itrs:exposure` (1 to 4) on a node
+
+So the way says how exposed the worst spot along it is, and the node says
+where that spot is. Nothing else from the point goes into OSM; the length,
+trail bed width, off-camber, and photo links stay in the report.
+
 A value of 0 in the export means "not rated" and is never written. Segments
 whose track type is "Paved/surfaced road" are never tagged either, since ITRS
 itself doesn't present a rating on surfaced roads. Endurance and wilderness
-aren't in the exports, so they're not handled.
+aren't in the exports, so they're not handled. Neither are the other point
+types (water, river crossings, rockfall, wildlife, general remarks); they're
+listed in the report only.
 
 ## Install
 
@@ -67,7 +80,9 @@ Then open the `.osm` in JOSM:
 1. Search for `modified` to select everything the tool changed.
 2. Run the validator and look at each split; the report lists every cut and
    whether it snapped to an existing node or inserted one.
-3. Paste the suggested changeset comment and source from the report into the
+3. Look at each exposure node; the report lists where each one landed and
+   how far it is from the surveyed point.
+4. Paste the suggested changeset comment and source from the report into the
    upload dialog, and upload. Only the modified and new elements go up.
 
 ## How it decides
@@ -90,13 +105,26 @@ rather than turned into a sliver. Ways are split the way JOSM does it: the
 piece with the most nodes keeps the id, every piece gets the original tags,
 and parent relations get the pieces inserted in order.
 
-If a way already carries a different ITRS value, the tool refuses to touch
-it, says so in the report, and exits with status 2. `--force` overwrites and
-records the old value.
+Exposure points sit on a vertex of the surveyed track, and the decode has
+already put that vertex on a way, so the node goes where the match says,
+not on the nearest way to the point. An existing node within 5 m gets the
+tag, unless it's shared with another trail (which trail would it belong to?)
+or already carries other tags such as a gate. Otherwise a new node is
+inserted on the way's own geometry. In the sample tracks, 28 of 30 points
+landed on an existing node.
+
+If a way or node already carries a different ITRS value, the tool refuses
+to touch it, says so in the report, and exits with status 2. `--force`
+overwrites and records the old value. One thing it can't do is remove a node
+for a point that ITRS no longer exports, so the report asks you to look for
+stale ones.
 
 All the thresholds are flags (`--corridor`, `--max-offset`, `--snap`,
 `--snap-junction`, `--min-piece`), and `--name` or `--way-id` pin the match
-when the rater's name and the mapper's name disagree. `--dry-run` matches and
+when the rater's name and the mapper's name disagree. `--exposure-min`
+raises the rating a point needs before it gets a node (the default, 2, is
+also ITRS's export threshold, so everything exported is written), and
+`--no-exposure-nodes` turns the node step off. `--dry-run` matches and
 reports without writing a `.osm`.
 
 ## What it won't do
@@ -116,7 +144,7 @@ python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
 ```
 
 The tests run offline on synthesized trails and OSM networks
-(`tests/fixtures/builder.py` has eleven scenarios with ground truth, each
+(`tests/fixtures/builder.py` has twelve scenarios with ground truth, each
 modeled on a real case). Real ITRS exports are private and never committed.
 If some are present in `research/exports/`, `tests/test_private_samples.py`
 runs on them too. `research/README.md` describes that directory.

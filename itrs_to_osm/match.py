@@ -150,11 +150,21 @@ class Interval:
         return "middle"
 
 
+@dataclass(frozen=True)
+class VertexPlace:
+    """Where the decode put one track vertex: a way, a chainage, an offset."""
+
+    way_id: int
+    along_m: float  # chainage on the way, in the matcher's local projection
+    offset_m: float
+
+
 @dataclass
 class SegmentMatch:
     segment: Segment
     intervals: list[Interval] = field(default_factory=list)
     dropped: list[Interval] = field(default_factory=list)  # tails shorter than min piece
+    vertex_places: list[VertexPlace | None] = field(default_factory=list)  # per segment vertex
     total_vertices: int = 0
     unmatched_vertices: int = 0
     p90_offset: float = 0.0
@@ -583,6 +593,12 @@ def match_track(track: Track, data: OsmData, options: MatchOptions | None = None
     for j, seg in enumerate(track.segments):
         s, e = ranges[j]
         sm = SegmentMatch(segment=seg, total_vertices=e - s + 1)
+        sm.vertex_places = [
+            VertexPlace(candidates[ci].way.id, p.along, p.distance)
+            if ci is not None and p is not None
+            else None
+            for ci, p in path[s : e + 1]
+        ]
         intervals, sm.unmatched_vertices = _intervals_for_segment(
             j, ranges, verts, gaps, path, candidates, shared_cache
         )

@@ -13,6 +13,7 @@ from itrs_to_osm.html_report import _script_json, write_html
 from itrs_to_osm.itrs import parse_track
 from itrs_to_osm.match import MatchOptions, match_track
 from itrs_to_osm.osm import read_osm_xml
+from itrs_to_osm.points import PointOptions, apply_points
 from itrs_to_osm.report import RunContext, changeset_suggestion, write_markdown
 from itrs_to_osm.split import CutOptions, apply_matches
 from itrs_to_osm.tagging import EXPOSURE_KEY, TECH_KEY
@@ -22,6 +23,7 @@ SECTIONS = [
     "## Summary",
     "## ITRS track: Test Trail",
     "## OSM ways changed",
+    "## OSM nodes changed",
     "## Not applied",
     "## Advisories",
     "## How to review in JOSM",
@@ -29,7 +31,9 @@ SECTIONS = [
 ]
 
 
-def run_ctx(name, *, force=False, edit_osm=None, edit_export=None, dry_run=False):
+def run_ctx(
+    name, *, force=False, edit_osm=None, edit_export=None, dry_run=False, point_options=None
+):
     """Run the pipeline on a scenario (like tests/test_split.py) and wrap it."""
     xml, export, expect = SCENARIOS[name]()
     if edit_export:
@@ -41,13 +45,17 @@ def run_ctx(name, *, force=False, edit_osm=None, edit_export=None, dry_run=False
     match_options, cut_options = MatchOptions(), CutOptions(force=force)
     matches = [match_track(track, data, match_options)]
     result = apply_matches(data, matches, cut_options)
+    point_options = point_options or PointOptions(force=force)
+    points = apply_points(data, matches, result, point_options)
     ctx = RunContext(
         tracks=[track],
         matches=matches,
         result=result,
+        points=points,
         data=data,
         match_options=match_options,
         cut_options=cut_options,
+        point_options=point_options,
         osm_source="test.osm",
         osm_base="2026-10-11T00:00:00Z",
         generated_at="2026-10-11T12:00:00+00:00",
@@ -184,7 +192,11 @@ def test_empty_sections_say_none_or_nothing(tmp_path):
     assert "## Not applied\n\nITRS data that produced no OSM edit, and why.\n\nNothing." in md
     assert "### Existing ITRS values overwritten\n\nNone." in md
     assert "### Direction\n\nNone." in md
-    assert "### ITRS rating points\n\nNone." in md
+    assert "### Other ITRS rating points\n\n" in md
+    assert md[md.index("### Other ITRS rating points") :].split("\n\n")[2] == "None."
+    nodes = md[md.index("## OSM nodes changed") : md.index("## Not applied")]
+    assert nodes.rstrip().endswith("None.")
+    assert "Exposure nodes tagged: 0 of 0 ITRS Exposure points" in md
 
 
 def test_direction_and_use_advisories(tmp_path):
@@ -257,13 +269,70 @@ def add_points(export):
 def test_rating_points_listed(tmp_path):
     ctx, _ = run_ctx("single_way_uniform", edit_export=add_points)
     md = markdown(ctx, tmp_path)
-    points = md[md.index("### ITRS rating points") : md.index("## How to review")]
-    assert "| S001 | Exposure | 3 (Life threatening consequences) |" in points
-    assert "width of trail bed cm: 65" in points
-    assert "[photo 1](https://example.com/p.jpg?a=1&b=2)" in points
-    assert "\\<b>cliff\\</b>" in points  # escaped for Markdown
+    points = md[md.index("### Other ITRS rating points") : md.index("## How to review")]
     assert "| S001 | RiverCrossing | Blue |" in points
     assert "https://www.openstreetmap.org/?mlat=" in points
+    assert "Exposure |" not in points  # listed under OSM nodes changed instead
+    nodes = md[md.index("## OSM nodes changed") : md.index("## Not applied")]
+    assert "| S001 | 3 (Life threatening consequences) |" in nodes
+    assert "width of trail bed cm: 65" in nodes
+    assert "[photo 1](https://example.com/p.jpg?a=1&b=2)" in nodes
+    assert "\\<b>cliff\\</b>" in nodes  # escaped for Markdown
+
+
+def test_exposure_node_section(tmp_path):
+    ctx, expect = run_ctx("boundary_near_existing_node")
+    md = markdown(ctx, tmp_path)
+    nodes = md[md.index("## OSM nodes changed") : md.index("## Not applied")]
+    row = next(line for line in nodes.splitlines() if line.startswith("| S002 |"))
+    assert "| 2 (High risk of serious injury) |" in row
+    assert re.search(
+        r"\| (\[n\d+ \(existing\)\]\(https://www\.openstreetmap\.org/node/\d+\)|new node) \|", row
+    )
+    assert "m off the way" in row and "| tagged |" in row
+    assert "width of trail bed cm: 40; off camber deg: 8.0" in row
+    assert f"{EXPOSURE_KEY}" in nodes and "stale" in nodes
+    assert "Exposure nodes tagged: 1 of 1 ITRS Exposure points" in md
+    points = md[md.index("### Other ITRS rating points") : md.index("## How to review")]
+    assert "S002" not in points and "None." in points
+    steps = md[md.index("## How to review in JOSM") :]
+    assert "Tools -> Merge Nodes" in steps
+    written = ctx.points.written
+    assert len(written) == 1 and ctx.data.nodes[written[0].node_id].tags[EXPOSURE_KEY] == "2"
+
+
+def test_exposure_nodes_turned_off(tmp_path):
+    ctx, _ = run_ctx("boundary_near_existing_node", point_options=PointOptions(enabled=False))
+    md = markdown(ctx, tmp_path)
+    nodes = md[md.index("## OSM nodes changed") : md.index("## Not applied")]
+    assert "turned off with --no-exposure-nodes" in nodes
+    assert "| S002 |" not in nodes
+    assert "Exposure nodes: turned off (--no-exposure-nodes)" in md
+    points = md[md.index("### Other ITRS rating points") : md.index("## How to review")]
+    assert "| S002 | Exposure | 2 (High risk of serious injury) |" in points
+    assert "Tools -> Merge Nodes" not in md
+
+
+def test_exposure_node_refused_and_forced(tmp_path):
+    def pre_tag(data, expect):
+        way = data.ways[expect["ways"]["trail"]]
+        for node_id in way.nodes[1:-1]:
+            data.nodes[node_id].tags[EXPOSURE_KEY] = "3"
+
+    ctx, _ = run_ctx("boundary_near_existing_node", edit_osm=pre_tag)
+    md = markdown(ctx, tmp_path)
+    (refused,) = ctx.points.refusals
+    assert "refused (node has 3)" in md
+    assert "node(s) already carry a different" in md and f"n{refused.node_id}" in md
+    assert "Refusals: 1" in md
+    not_applied = md[md.index("## Not applied") : md.index("## Advisories")]
+    assert f"nothing written to n{refused.node_id}, existing {EXPOSURE_KEY}=3" in not_applied
+
+    ctx, _ = run_ctx("boundary_near_existing_node", edit_osm=pre_tag, force=True)
+    md = markdown(ctx, tmp_path)
+    advisories = md[md.index("## Advisories") :]
+    (c,) = ctx.points.written
+    assert f"node {c.node_id}: {EXPOSURE_KEY} was 3, now 2 (Test Trail / S002)" in advisories
 
 
 def test_dry_run_review_steps(tmp_path):
@@ -374,6 +443,25 @@ def test_html_escapes_tag_values(tmp_path):
     point_popups = " ".join(p["popup"] for p in data["points"])
     assert "&lt;/script&gt; &amp; &lt;b&gt;cliff&lt;/b&gt;" in point_popups
     assert 'href="https://example.com/p.jpg?a=1&amp;b=2"' in point_popups
+
+
+def test_html_exposure_node_marker(tmp_path):
+    ctx, _ = run_ctx("boundary_near_existing_node")
+    doc = html_report(ctx, tmp_path)
+    data = map_json(doc)
+    (point,) = data["points"]
+    (change,) = ctx.points.written
+    node = ctx.data.nodes[change.node_id]
+    assert point["color"] == "#0080c6" and point["written"]
+    assert (point["lat"], point["lon"]) == (node.lat, node.lon)
+    assert "2 (High risk of serious injury)" in point["popup"]
+    assert "OSM nodes with exposure applied" in doc and "ITRS point (not written)" in doc
+    assert "swatch dot" in doc and ">OSM nodes changed</h2>" in doc
+
+    ctx, _ = run_ctx("boundary_near_existing_node", point_options=PointOptions(enabled=False))
+    (point,) = map_json(html_report(ctx, tmp_path))["points"]
+    assert point["color"] == "#ffffff" and not point["written"]
+    assert "turned off" in point["popup"]
 
 
 def test_html_unmatched_segment_in_grey(tmp_path):

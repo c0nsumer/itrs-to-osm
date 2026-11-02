@@ -18,6 +18,7 @@ from .itrs import ItrsError, Track, load_track
 from .match import MatchOptions, match_track
 from .osm import Bounds, OsmData, read_osm_file, read_osm_xml, write_josm_file
 from .overpass import DEFAULT_ENDPOINT, OverpassError, fetch_area
+from .points import PointOptions, apply_points
 from .report import RunContext, write_markdown
 from .split import CutOptions, apply_matches
 
@@ -59,6 +60,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--min-piece", type=float, default=15.0, help="drop pieces shorter than, m (15)")
     p.add_argument("--force", action="store_true", help="overwrite differing existing ITRS values")
+    p.add_argument(
+        "--exposure-min",
+        type=int,
+        default=2,
+        help="tag a node for Exposure points rated this or worse, 1-4 (2: everything ITRS exports)",
+    )
+    p.add_argument(
+        "--no-exposure-nodes", action="store_true", help="write no nodes for Exposure points"
+    )
     p.add_argument("--html", action="store_true", help="also write an HTML report")
     p.add_argument("--dry-run", action="store_true", help="match and report, write no .osm")
     p.add_argument("-v", "--verbose", action="store_true")
@@ -152,8 +162,20 @@ def run(args: argparse.Namespace) -> int:
         force=args.force,
     )
 
+    if args.exposure_min not in range(1, 5):
+        print(f"error: --exposure-min expects 1 to 4, got {args.exposure_min}", file=sys.stderr)
+        return EXIT_ERROR
+    point_options = PointOptions(
+        snap_m=args.snap,
+        min_exposure=args.exposure_min,
+        max_offset_m=args.max_offset,
+        force=args.force,
+        enabled=not args.no_exposure_nodes,
+    )
+
     matches = [match_track(t, data, match_options) for t in tracks]
     result = apply_matches(data, matches, cut_options)
+    points = apply_points(data, matches, result, point_options)
 
     base.parent.mkdir(parents=True, exist_ok=True)
     osm_path: Path | None = None
@@ -165,9 +187,11 @@ def run(args: argparse.Namespace) -> int:
         tracks=tracks,
         matches=matches,
         result=result,
+        points=points,
         data=data,
         match_options=match_options,
         cut_options=cut_options,
+        point_options=point_options,
         osm_source=osm_source,
         osm_base=osm_base,
         generated_at=datetime.now(UTC).isoformat(timespec="seconds"),
@@ -183,9 +207,10 @@ def run(args: argparse.Namespace) -> int:
         write_html(ctx, base.with_name(base.name + ".report.html"))
 
     print(summary_line(ctx, report_path))
-    if result.refusals and not args.force:
+    refused = len(result.refusals) + len(points.refusals)
+    if refused and not args.force:
         print(
-            f"refused: {len(result.refusals)} existing ITRS value(s) differ; "
+            f"refused: {refused} existing ITRS value(s) differ; "
             "see the report, or rerun with --force to overwrite",
             file=sys.stderr,
         )
@@ -205,7 +230,9 @@ def summary_line(ctx: RunContext, report_path: Path) -> str:
         f"{len(ctx.tracks)} track(s), {len(segs)} segments: "
         f"{counts['matched']} matched, {counts['partial']} partial, {counts['unmatched']} unmatched",
         f"{len(ways.modified_ways)} way(s) modified, {ways.ways_added} created by splits, "
-        f"{ways.nodes_added} node(s) added, {ways.relations_modified} relation(s) updated",
+        f"{ways.nodes_added + ctx.points.nodes_added} node(s) added, "
+        f"{ways.relations_modified} relation(s) updated",
+        f"{len(ctx.points.written)} exposure node(s) tagged",
     ]
     if ctx.osm_path:
         parts.append(f"wrote {ctx.osm_path}")

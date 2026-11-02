@@ -520,6 +520,7 @@ def itrs_export_along(
 #   refused               [{"way_id", "key", "old", "new"}] without --force
 #   parse_warnings        how many warnings parse_track should report
 #
+# Exposure points are built with ``exposure_point`` (realistic ITRS props).
 # Scenario-specific extras are documented on each function.
 
 PATH_TAGS = {"highway": "path", "bicycle": "designated", "mtb:scale:imba": "1"}
@@ -540,6 +541,40 @@ def _piece(from_m: float, to_m: float, tech: int = 0, exposure: int = 0) -> dict
 
 def _seg(length_m: float, tech: int, exposure: int, **extra: Any) -> dict[str, Any]:
     return {"length_m": length_m, "tech": tech, "exposure": exposure, **extra}
+
+
+EXPOSURE_LENGTHS = ("up to 5m long", "up to 30m long", "longer than 30m")
+
+
+def exposure_point(
+    at_m: float,
+    rating: int,
+    *,
+    length: str | None = None,
+    width_cm: int = 35,
+    off_camber_deg: float = 10.0,
+    remark: str = "",
+    photos: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """A point spec for ``itrs_export_along``: an ITRS Exposure point at ``at_m``.
+
+    The props mirror a real export: the rating is an int, width and
+    off-camber are strings, and the length is a text bucket that ITRS leaves
+    blank for rating 2 (``length`` defaults to "up to 30m long" otherwise).
+    The segment and track references are filled in by ``itrs_export_along``.
+    """
+    if length is None:
+        length = "" if rating <= 2 else EXPOSURE_LENGTHS[1]
+    props: dict[str, Any] = {
+        "point_exposure_rating": rating,
+        "point_exposure_width_of_trail_bed_cm": str(width_cm),
+        "point_exposure_off_camber_deg": f"{off_camber_deg:.1f}",
+        "point_exposure_length": length,
+        "point_remark": remark,
+    }
+    for k in range(3):
+        props[f"point_photo_{k + 1}"] = photos[k] if k < len(photos) else ""
+    return {"type": "Exposure", "at_m": float(at_m), "props": props}
 
 
 def _nearest_node(net: Network, way_id: int, at_m: float) -> tuple[int, float]:
@@ -640,13 +675,7 @@ def boundary_near_existing_node() -> tuple[str, dict[str, Any], dict[str, Any]]:
         path,
         [_seg(150, 2, 1), _seg(200, 3, 2), _seg(150, 2, 1)],
         jitter_m=1.0,
-        points=[
-            {
-                "type": "Exposure",
-                "at_m": 250.0,
-                "props": {"point_exposure_rating": 2, "point_exposure_length_m": 12},
-            }
-        ],
+        points=[exposure_point(250.0, 2, width_cm=40, off_camber_deg=8.0)],
     )
     expect = _expect(
         net,
@@ -949,6 +978,101 @@ def not_rated_zero() -> tuple[str, dict[str, Any], dict[str, Any]]:
     return net.to_xml(), export, expect
 
 
+def exposure_points() -> tuple[str, dict[str, Any], dict[str, Any]]:
+    """Exposure points on a 600 m way with a side path joining at 300 m.
+
+    The main way bends slightly at 300 m, where a side path heads north from
+    a junction node shared by both ways. S001 (0-450 m, rated 2/3) and S002
+    (450-600 m, rated 3/2) split the main way with an inserted node at 450 m.
+    Five Exposure points sit on track vertices:
+
+    - a: rated 2 at 144 m, 3 m from a plain node at 141 m: that node is tagged.
+    - b: rated 3 at 216 m, mid-way in the 60 m gap between 190 m and 250 m:
+      a node is inserted.
+    - c: rated 2 exactly at the junction (300 m): the junction is ambiguous,
+      so a node is inserted ~1 m along the main way, between the junction
+      and the node at 340 m.
+    - d: rated 1 at 400 m: below the default --exposure-min 2, skipped.
+    - e: rated 2 at 520 m, 3 m from the node at 517 m, which already carries
+      exposure=3: refused without --force, overwritten with it. That node
+      ends up on the new piece (450-600 m).
+
+    Mimics ITRS exposure points on a rated trail crossing a junction.
+
+    Extra: ``junction_node``, ``tagged_node_id`` (the node at 517 m with
+    exposure=3 already), and ``exposure_nodes``: one dict per Exposure
+    point, in export order, with ``label``, ``at_m``, ``rating``,
+    ``status`` (without --force), ``status_with_force``, ``kind`` ("node",
+    "inserted" or "" when nothing is placed), ``node_id`` (the existing
+    node for kind "node", else None), ``between`` (the original node ids on
+    either side of an inserted node, else None), ``old`` (the existing
+    value on refusal), and ``not_node`` (a node that must stay untouched).
+    ``points_nodes_added`` is how many nodes apply_points inserts.
+    """
+    net = Network()
+    path = legs((0, 0), [(300, 90), (300, 80)])
+    dists = [0, 45, 95, 141, 190, 250, 300, 340, 380, 440, 480, 517, 560, 600]
+    pts = points_along(path, [float(d) for d in dists])
+    assert len(pts) == len(dists)
+    ids = {
+        d: net.node(*xy, tags={EXPOSURE: "3"} if d == 517 else None) for d, xy in zip(dists, pts)
+    }
+    main = net.polyline([ids[d] for d in dists], {**PATH_TAGS, "name": "Test Trail"})
+    junction = ids[300]
+    side = net.polyline([junction, (300, 200)], {**PATH_TAGS, "name": "Side Trail"}, spacing_m=30)
+    export = itrs_export_along(
+        net,
+        path,
+        [_seg(450, 2, 3), _seg(150, 3, 2)],
+        jitter_m=0.5,
+        seed=5,
+        points=[
+            exposure_point(144, 2, width_cm=60, off_camber_deg=5.0),
+            exposure_point(216, 3, width_cm=30, off_camber_deg=15.0, length="up to 5m long"),
+            exposure_point(300, 2),
+            exposure_point(400, 1, width_cm=80, off_camber_deg=0.0),
+            exposure_point(
+                520,
+                2,
+                remark="narrow ledge above the creek",
+                photos=("https://example.invalid/ledge.jpg",),
+            ),
+        ],
+    )
+    exposure_nodes = [
+        {"label": "a", "at_m": 144.0, "rating": 2, "status": "tagged", "kind": "node",
+         "node_id": ids[141], "between": None},
+        {"label": "b", "at_m": 216.0, "rating": 3, "status": "tagged", "kind": "inserted",
+         "node_id": None, "between": (ids[190], ids[250])},
+        {"label": "c", "at_m": 300.0, "rating": 2, "status": "tagged", "kind": "inserted",
+         "node_id": None, "between": (junction, ids[340]), "not_node": junction},
+        {"label": "d", "at_m": 400.0, "rating": 1, "status": "skipped", "kind": "",
+         "node_id": None, "between": None},
+        {"label": "e", "at_m": 520.0, "rating": 2, "status": "refused",
+         "status_with_force": "overwritten", "kind": "node", "node_id": ids[517],
+         "between": None, "old": "3"},
+    ]  # fmt: skip
+    for p in exposure_nodes:
+        p.setdefault("status_with_force", p["status"])
+        p.setdefault("old", None)
+        p.setdefault("not_node", None)
+    expect = _expect(
+        net,
+        "exposure_points",
+        "ITRS Exposure points on a rated trail crossing a junction",
+        ways={"main": main, "side": side},
+        trail_way_ids=[main],
+        untouched_way_ids=[side],
+        cuts={main: [{"at_m": 450.0, "kind": "insert", "node_id": None}]},
+        pieces={main: [_piece(0, 450, 2, 3), _piece(450, 600, 3, 2)]},
+        junction_node=junction,
+        tagged_node_id=ids[517],
+        exposure_nodes=exposure_nodes,
+        points_nodes_added=2,
+    )
+    return net.to_xml(), export, expect
+
+
 SCENARIOS = {
     fn.__name__: fn
     for fn in (
@@ -963,5 +1087,6 @@ SCENARIOS = {
         existing_itrs_tags,
         paved_road_segment,
         not_rated_zero,
+        exposure_points,
     )
 }
