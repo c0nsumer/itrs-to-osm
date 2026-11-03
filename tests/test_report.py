@@ -21,7 +21,7 @@ from itrs_to_osm.tagging import EXPOSURE_KEY, TECH_KEY
 SECTIONS = [
     "# itrs-to-osm report",
     "## Summary",
-    "## ITRS track: Test Trail",
+    "## ITRS tracks",
     "## OSM ways changed",
     "## OSM nodes changed",
     "## Not applied",
@@ -138,6 +138,7 @@ def test_paved_road_not_applied(tmp_path):
     assert "matched, not applied" in md
     not_applied = md[md.index("## Not applied") : md.index("## Advisories")]
     assert f"Test Trail / S002 on w{road}: paved road" in not_applied
+    assert "### Test Trail" in md
     assert f"### w{road}" not in md  # the road is never edited
 
 
@@ -417,7 +418,7 @@ def test_html_parses_and_has_map(tmp_path):
     assert "#0080c6" in colors and "#ee3124" in colors  # tech 2 and 3 pieces
     for section in (
         "Summary",
-        "ITRS track: Test Trail",
+        "ITRS tracks",
         "OSM ways changed",
         "Not applied",
         "Advisories",

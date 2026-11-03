@@ -64,11 +64,21 @@ Several exports at once go into one JOSM file, which matters when two tracks
 touch the same way (a track's tail often runs a few meters onto the
 neighboring trail, and "Pt. 1" of a trail implies a Pt. 2 on the same way).
 Separate files would each modify that way from the same base version, and
-the second upload would conflict:
+the second upload would conflict. It also matters when one export updates
+part of another; see "Re-surveys and updates" below:
 
 ```
 itrs-to-osm geojson-export_*.geojson --out copper-harbor
 ```
+
+A run goes in this order, whether it holds one export or forty: every export
+is parsed first, then one OSM download covers all of them (areas that
+overlap merge into one request), each track is matched to ways on its own,
+then every track's claims on each way are resolved together (where ratings
+differ, the newer survey wins, then the longer claim), the ways are cut and
+tagged, the Exposure points get their nodes, and the report is written. So
+the order of the files on the command line doesn't matter, and a track
+matched in one run comes out the same in a batch.
 
 The first run downloads the area from the Overpass API and caches it under
 `./cache`, so reruns are offline and reproducible. `--refresh` downloads
@@ -115,9 +125,9 @@ landed on an existing node.
 
 If a way or node already carries a different ITRS value, the tool refuses
 to touch it, says so in the report, and exits with status 2. `--force`
-overwrites and records the old value. One thing it can't do is remove a node
-for a point that ITRS no longer exports, so the report asks you to look for
-stale ones.
+overwrites and records the old value (the next section has the workflow).
+One thing it can't do is remove a node for a point that ITRS no longer
+exports, so the report asks you to look for stale ones.
 
 All the thresholds are flags (`--corridor`, `--max-offset`, `--snap`,
 `--snap-junction`, `--min-piece`), and `--name` or `--way-id` pin the match
@@ -126,6 +136,54 @@ raises the rating a point needs before it gets a node (the default, 2, is
 also ITRS's export threshold, so everything exported is written), and
 `--no-exposure-nodes` turns the node step off. `--dry-run` matches and
 reports without writing a `.osm`.
+
+## Re-surveys and updates
+
+ITRS can't edit a segment in place. When a rater re-rates a corner, or
+re-surveys part of a trail after work on it, the fix arrives as a short new
+export that overlaps the original ("Berry Picker" plus "Berry Picker (first
+corner update)" at Copper Harbor). Long trails also arrive in parts
+("Garden Brook Part 1", "Pt. 2", "Part 3"), and the parts overlap by a few
+meters where one survey ended and the next began.
+
+Where two tracks in a batch rate the same stretch of a way differently, the
+newer survey wins (each segment carries a `segment_last_mutated_on_utc`
+date). Between surveys of the same date, the longer claim wins, which is
+what you want at a junction where one track's tail runs a few meters onto
+the other's trail. Every such overlap is listed in the report under
+"Overlapping surveys" with both ratings, both dates, and which one won, so
+check that list first when a batch holds updates. The older survey's
+Exposure points on a re-rated stretch are stale (the newer survey exported
+its own) and get no node; the report says so.
+
+If the batch holds the same survey twice (ITRS can export one track under
+two names and uuids; "Red Trail" and "Red Trail Sync #2" were identical),
+the report warns that the second is a re-export. Both are processed and the
+results coincide, so drop one of the files and rerun if you'd rather have a
+tidy report.
+
+Updating ratings that are already in OSM is the same run, against the
+current OSM data: give the tool the new export (alone, or with the rest of
+the batch). Where the new rating differs from what a way or node already
+carries, the tool refuses and exits with status 2. That's deliberate, as it
+can't tell a re-survey from a mistake: OSM carries no survey date for these
+keys. Read the refusals in the report, and if they're the update you expect,
+rerun with `--force`. The tool then cuts the way at the new boundaries,
+tags the pieces, and records every overwritten value under "Existing ITRS
+values overwritten".
+
+The cuts from the earlier survey stay where they are, so after an update
+two adjacent pieces can end up with identical tags. The tool doesn't
+combine ways (it can't tell a cut it made last time from one somebody else
+needed, and combining deletes a way), but the report lists those pairs
+under "Pieces that could be combined". If nothing else needs the cut,
+select both ways in JOSM and use Tools -> Combine Way before uploading.
+
+Two things the tool leaves alone on an update: a stretch the new survey
+rates 0 (not assessed) or marks as paved keeps whatever tags it had, since
+0 means "not rated" rather than "no rating", and the report shows it under
+"Not applied"; and nodes from an earlier run whose points the new survey
+no longer exports, which you'll want to find and clear by hand.
 
 ## What it won't do
 

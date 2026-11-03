@@ -123,6 +123,11 @@ def _as_str(value: Any) -> str:
     return "" if value is None else str(value)
 
 
+def _as_name(value: Any) -> str:
+    """A name as typed in the app, minus surrounding whitespace ("Cabin Life ")."""
+    return _as_str(value).strip()
+
+
 def _coords_3d(raw: Any, what: str) -> list[tuple[float, float, float | None]]:
     """Normalize GeoJSON positions to (lon, lat, elevation-or-None)."""
     if not isinstance(raw, list) or not raw:
@@ -274,7 +279,7 @@ class Track:
 def _parse_segment(feature: dict[str, Any], index: int) -> Segment:
     props = feature.get("properties") or {}
     what = f"segment feature #{index}"
-    name = _as_str(_first(props, SEGMENT_ALIASES["name"])) or f"#{index}"
+    name = _as_name(_first(props, SEGMENT_ALIASES["name"])) or f"#{index}"
     what = f"segment {name}"
     coords = _coords_3d((feature.get("geometry") or {}).get("coordinates"), what)
     if len(coords) < 2:
@@ -300,7 +305,7 @@ def _parse_segment(feature: dict[str, Any], index: int) -> Segment:
         length_m=_as_float(_first(props, SEGMENT_ALIASES["length_m"])),
         itrs_version=_as_str(_first(props, SEGMENT_ALIASES["itrs_version"])),
         last_mutated=_as_str(_first(props, SEGMENT_ALIASES["last_mutated"])),
-        track_name=_as_str(_first(props, SEGMENT_ALIASES["track_name"])),
+        track_name=_as_name(_first(props, SEGMENT_ALIASES["track_name"])),
         track_uuid=_as_str(_first(props, SEGMENT_ALIASES["track_uuid"])),
         props=props,
     )
@@ -318,7 +323,7 @@ def _parse_point(feature: dict[str, Any], index: int) -> RatingPoint:
         lat=lat,
         ele=ele,
         segment_uuid=_as_str(_first(props, POINT_ALIASES["segment_uuid"])),
-        segment_name=_as_str(_first(props, POINT_ALIASES["segment_name"])),
+        segment_name=_as_name(_first(props, POINT_ALIASES["segment_name"])),
         remark=_as_str(_first(props, POINT_ALIASES["remark"])).strip(),
         photos=photos,
         props=props,
@@ -395,7 +400,7 @@ def parse_track(data: dict[str, Any], source: str = "<memory>") -> Track:
                 f"{p.point_type or 'point'} references unknown segment {p.segment_uuid}"
             )
 
-    name = _as_str(_first(start_props, START_ALIASES["name"])) or segments[0].track_name
+    name = _as_name(_first(start_props, START_ALIASES["name"])) or segments[0].track_name
     uuid = _as_str(_first(start_props, START_ALIASES["uuid"])) or segments[0].track_uuid
     max_tech_raw = _first(start_props, START_ALIASES["max_tech_rating"])
     max_exp_raw = _first(start_props, START_ALIASES["max_exposure_rating"])
@@ -419,6 +424,50 @@ def parse_track(data: dict[str, Any], source: str = "<memory>") -> Track:
         start_props=start_props,
         warnings=warnings,
     )
+
+
+REEXPORT_TOL_M = 0.5
+
+
+def is_reexport(a: Track, b: Track) -> bool:
+    """True when ``b`` carries the same survey as ``a`` under another track uuid.
+
+    The ITRS app can export one survey twice ("Red Trail" and "Red Trail Sync
+    #2" at Copper Harbor): every segment has the same name, ratings, type,
+    use, direction, survey date, and vertices, and only the uuids differ.
+    Processing both is harmless (the claims coincide), but the report doubles
+    up, so the caller warns.
+    """
+    if len(a.segments) != len(b.segments):
+        return False
+    for x, y in zip(a.segments, b.segments):
+        if (
+            x.name != y.name
+            or x.tech_rating != y.tech_rating
+            or x.max_exposure != y.max_exposure
+            or x.track_type != y.track_type
+            or x.use != y.use
+            or x.direction != y.direction
+            or x.last_mutated != y.last_mutated
+            or len(x.coords) != len(y.coords)
+        ):
+            return False
+        if any(distance_m(p, q) > REEXPORT_TOL_M for p, q in zip(x.coords, y.coords)):
+            return False
+    return True
+
+
+def flag_reexports(tracks: list[Track]) -> None:
+    """Warn on every track that re-exports an earlier one in the list (in place)."""
+    for i, later in enumerate(tracks):
+        for earlier in tracks[:i]:
+            if is_reexport(earlier, later):
+                later.warnings.append(
+                    f"appears to be a re-export of {earlier.name!r} (same segments, ratings, "
+                    "survey dates, and vertices; only the uuids differ); its results coincide "
+                    "with that track's, so one of the two files can be left out"
+                )
+                break
 
 
 def load_track(path: str | Path) -> Track:

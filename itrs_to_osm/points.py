@@ -10,8 +10,10 @@ segment, and the decode already put that vertex on a way at a chainage
 (``SegmentMatch.vertex_places``). After the ways are split, the node goes
 on the piece holding that chainage: an existing node within ``snap_m``
 unless it's a junction or carries other tags, else a new node inserted on
-the way's own geometry. Runs after ``split.apply_matches``; nothing here
-talks to OSM.
+the way's own geometry. A point whose stretch of way a newer survey rated
+(``Piece.surveyed``) is stale and gets no node: the newer survey exported
+its own points. Runs after ``split.apply_matches``; nothing here talks to
+OSM.
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ from .geo import LocalProjection, project_point
 from .itrs import NOT_RATED, RatingPoint, Segment, Track, distance_m
 from .match import SegmentMatch, TrackMatch
 from .osm import Node, OsmData, Way
-from .split import ApplyResult, Piece, _chainage, _is_junction, insert_node_at
+from .split import ApplyResult, Piece, _chainage, _is_junction, insert_node_at, sources_text
 from .tagging import EXPOSURE_KEY, EXPOSURE_VALUES
 
 EXPOSURE_TYPE = "Exposure"
@@ -57,6 +59,7 @@ class PointChange:
     from_point_m: float = 0.0  # straight line from the surveyed coordinate to the node
     offset_m: float = 0.0  # the point's distance from the way, per the match
     old: str | None = None  # the existing value when refused or overwritten
+    surveyed: str = ""  # YYYY-MM-DD of the segment's survey, "" when unknown
 
     @property
     def written(self) -> bool:
@@ -105,19 +108,18 @@ def _locate(
 ) -> tuple[int, float, float] | str:
     """(way id, chainage m, offset m) for the point, or the reason it has none."""
     seg = sm.segment
-    kept = {iv.way_id for iv in sm.intervals}
     lonlat = (point.lon, point.lat)
     k, d = min(((i, distance_m(lonlat, c)) for i, c in enumerate(seg.coords)), key=lambda x: x[1])
     if d <= ON_VERTEX_TOL_M and k < len(sm.vertex_places):
         place = sm.vertex_places[k]
         if place is None:
             return "its track vertex is off-network"
-        if place.way_id in kept and any(
-            iv.way_id == place.way_id
-            and iv.start - INTERVAL_TOL_M <= place.along_m <= iv.end + INTERVAL_TOL_M
-            for iv in sm.intervals
-        ):
-            return place.way_id, place.along_m, place.offset_m
+        # A GPS backtrack can put the vertex a few meters outside the segment's
+        # interval on the right way; clamp it in, within the snap distance.
+        tol = max(INTERVAL_TOL_M, options.snap_m)
+        for iv in sm.intervals:
+            if iv.way_id == place.way_id and iv.start - tol <= place.along_m <= iv.end + tol:
+                return place.way_id, min(max(place.along_m, iv.start), iv.end), place.offset_m
         if any(iv.way_id == place.way_id for iv in sm.dropped):
             return f"it sits on the dropped tail onto way {place.way_id}"
         return f"its track vertex landed outside the segment's stretch of way {place.way_id}"
@@ -142,11 +144,11 @@ def _locate(
     return best[1], best[2], best[0]
 
 
-def _piece_for(result: ApplyResult, way_id: int, along_m: float) -> tuple[int, float]:
-    """(piece way id, chainage on that piece) after the splits."""
+def _piece_for(result: ApplyResult, way_id: int, along_m: float) -> tuple[int, float, Piece | None]:
+    """(piece way id, chainage on that piece, the piece) after the splits."""
     change = next((w for w in result.ways if w.way_id == way_id), None)
     if change is None or not change.pieces:
-        return way_id, along_m
+        return way_id, along_m, None
     best: Piece | None = None
     best_d = float("inf")
     for p in change.pieces:
@@ -157,7 +159,7 @@ def _piece_for(result: ApplyResult, way_id: int, along_m: float) -> tuple[int, f
         if d < best_d:
             best, best_d = p, d
     assert best is not None
-    return best.way_id, min(max(along_m - best.start_m, 0.0), best.length)
+    return best.way_id, min(max(along_m - best.start_m, 0.0), best.length), best
 
 
 def _usable(data: OsmData, node: Node) -> bool:
@@ -236,6 +238,7 @@ def apply_points(
                 change.reason = f"references unknown segment {point.segment_uuid or seg_name}"
                 continue
             seg, sm = found
+            change.surveyed = seg.last_mutated[:10]
             if sm.status == "unmatched" or not sm.intervals:
                 change.status, change.reason = "unplaced", f"{seg.name} is unmatched"
                 continue
@@ -251,10 +254,16 @@ def apply_points(
                     "resolve that first, or rerun with --force"
                 )
                 continue
-            piece_id, local_m = _piece_for(result, way_id, along_m)
+            piece_id, local_m, piece = _piece_for(result, way_id, along_m)
             way = data.ways.get(piece_id)
             if way is None:
                 change.status, change.reason = "unplaced", f"way {piece_id} is not in the data"
+                continue
+            if piece is not None and piece.surveyed > change.surveyed:
+                change.reason = (
+                    f"stale: a newer survey ({piece.surveyed}, {sources_text(piece.sources)}) "
+                    f"rated this stretch of way {piece_id}; its own points apply"
+                )
                 continue
 
             node, change.kind, change.moved_m = _choose_node(data, way, local_m, options)
@@ -263,20 +272,30 @@ def apply_points(
             if change.kind == "inserted":
                 out.nodes_added += 1
             new = str(value)
-            # The node's value before this run touched it decides refusals;
-            # the value it carries now decides which of two points wins it.
+            # The node's value before this run touched it decides refusals.
+            # When two points of this run land on one node, the newer survey
+            # wins; between surveys of the same date, the higher rating stays.
             orig = original.setdefault(node.id, node.tags.get(EXPOSURE_KEY))
             earlier = by_node.get(node.id)
             current = node.tags.get(EXPOSURE_KEY)
-            if earlier is not None and current is not None and value <= int(current):
-                if new == orig:
-                    change.status, change.reason = "already", "node already carries this value"
-                else:
-                    change.reason = (
-                        f"shares node {node.id} with a point rated {current}; "
-                        "the higher rating stays"
-                    )
-                continue
+            if earlier is not None and current is not None:
+                older = change.surveyed < earlier.surveyed
+                newer = change.surveyed > earlier.surveyed
+                if older or (not newer and value <= int(current)):
+                    if new == orig:
+                        change.status = "already"
+                        change.reason = "node already carries this value"
+                    elif older:
+                        change.reason = (
+                            f"shares node {node.id} with a point rated {current} from a newer "
+                            f"survey ({earlier.surveyed}); that one stays"
+                        )
+                    else:
+                        change.reason = (
+                            f"shares node {node.id} with a point rated {current}; "
+                            "the higher rating stays"
+                        )
+                    continue
             if orig == new:
                 change.status, change.reason = "already", "node already carries this value"
             elif orig is not None and not options.force:
@@ -290,7 +309,11 @@ def apply_points(
                 if earlier is not None and earlier.status in ("tagged", "overwritten", "already"):
                     earlier.status = "skipped"
                     earlier.reason = (
-                        f"shares node {node.id} with a point rated {new}; the higher rating stays"
+                        f"shares node {node.id} with a point rated {new} from a newer survey "
+                        f"({change.surveyed}); that one stays"
+                        if change.surveyed > earlier.surveyed
+                        else f"shares node {node.id} with a point rated {new}; "
+                        "the higher rating stays"
                     )
             by_node[node.id] = change
     return out

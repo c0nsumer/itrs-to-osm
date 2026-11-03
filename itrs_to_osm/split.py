@@ -2,7 +2,8 @@
 
 Per OSM way, the intervals from every matched segment (of every track in
 the batch) become claims in way chainage. Claims resolve into zones (same
-tags merge, overlaps go to the longer claim), zone edges become cuts, cuts
+tags merge; where ratings differ, the newer survey wins, and the longer claim
+wins between surveys of the same date), zone edges become cuts, cuts
 become nodes (an existing junction node if one is close, else any existing
 node if closer still, else a new node on the way's own geometry), the way
 is split JOSM-style (the piece with the most nodes keeps the id), the
@@ -47,6 +48,7 @@ class Claim:
     start_m: float
     end_m: float
     sources: list[str] = field(default_factory=list)  # "Track / S003" labels
+    surveyed: str = ""  # YYYY-MM-DD from segment_last_mutated_on_utc; "" when unknown
 
     @property
     def length(self) -> float:
@@ -54,7 +56,7 @@ class Claim:
 
     @property
     def label(self) -> str:
-        return ", ".join(self.sources)
+        return sources_text(self.sources)
 
 
 @dataclass
@@ -63,6 +65,26 @@ class Zone:
     end_m: float
     tags: dict[str, str]
     sources: list[str] = field(default_factory=list)  # "Track / S003" labels
+    surveyed: str = ""
+
+    @property
+    def length(self) -> float:
+        return self.end_m - self.start_m
+
+
+@dataclass
+class Overlap:
+    """Two claims with different ratings on one stretch of a way, and who won."""
+
+    start_m: float
+    end_m: float
+    winner: list[str]  # "Track / S003" labels
+    winner_tags: dict[str, str]
+    winner_surveyed: str
+    loser: list[str]
+    loser_tags: dict[str, str]
+    loser_surveyed: str
+    rule: str  # "newer" | "longer"
 
     @property
     def length(self) -> float:
@@ -92,6 +114,7 @@ class Piece:
     tags_before: dict[str, str]
     tags_after: dict[str, str]
     sources: list[str]
+    surveyed: str = ""  # survey date of the zone that rated the piece, "" when none
 
     @property
     def length(self) -> float:
@@ -136,6 +159,7 @@ class WayChange:
     pieces: list[Piece] = field(default_factory=list)
     relations: list[RelationChange] = field(default_factory=list)
     refusals: list[Refusal] = field(default_factory=list)
+    overlaps: list[Overlap] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     modified: bool = False
 
@@ -158,6 +182,10 @@ class ApplyResult:
     @property
     def refusals(self) -> list[Refusal]:
         return [r for w in self.ways for r in w.refusals]
+
+    @property
+    def overlaps(self) -> list[tuple[WayChange, Overlap]]:
+        return [(w, o) for w in self.ways for o in w.overlaps]
 
     @property
     def modified_ways(self) -> list[WayChange]:
@@ -184,6 +212,25 @@ def _label(track_name: str, segment: Segment) -> str:
     return f"{track_name} / {segment.name}"
 
 
+def sources_text(sources: list[str]) -> str:
+    """``Track / S002, S004, S005; Other / S001`` for a list of segment labels.
+
+    Labels are ``Track / Sxxx`` (see ``_label``); the segments of one track
+    are listed once under the track name, in label order, so a piece rated
+    by five segments of a long track name reads as one entry.
+    """
+    groups: dict[str, list[str]] = {}
+    for label in sources:
+        track, sep, seg = label.rpartition(" / ")
+        if not sep:
+            groups.setdefault(label, [])
+            continue
+        segs = groups.setdefault(track, [])
+        if seg not in segs:
+            segs.append(seg)
+    return "; ".join(f"{t} / {', '.join(sorted(s))}" if s else t for t, s in groups.items())
+
+
 def _collect_claims(data: OsmData, matches: list[TrackMatch]) -> dict[int, list[Claim]]:
     claims: dict[int, list[Claim]] = {}
     cums: dict[int, list[float]] = {}
@@ -205,7 +252,12 @@ def _collect_claims(data: OsmData, matches: list[TrackMatch]) -> dict[int, list[
                     start, end = end, start
                 claims.setdefault(way.id, []).append(
                     Claim(
-                        tm.track.name, dict(tags), start, end, [_label(tm.track.name, sm.segment)]
+                        tm.track.name,
+                        dict(tags),
+                        start,
+                        end,
+                        [_label(tm.track.name, sm.segment)],
+                        surveyed=sm.segment.last_mutated[:10],
                     )
                 )
     return {way_id: _merge_same_track(c) for way_id, c in claims.items()}
@@ -224,6 +276,7 @@ def _merge_same_track(claims: list[Claim]) -> list[Claim]:
             if c.start_m <= current.end_m + 0.5:
                 current.end_m = max(current.end_m, c.end_m)
                 current.sources.extend(s for s in c.sources if s not in current.sources)
+                current.surveyed = max(current.surveyed, c.surveyed)
             else:
                 out.append(current)
                 current = c
@@ -231,15 +284,25 @@ def _merge_same_track(claims: list[Claim]) -> list[Claim]:
     return out
 
 
-def _resolve_zones(claims: list[Claim], notes: list[str], min_piece_m: float) -> list[Zone]:
-    """Longer claims win overlaps; equal tags merge; result sorted by chainage.
+def _resolve_zones(
+    claims: list[Claim], notes: list[str], min_piece_m: float, overlaps: list[Overlap]
+) -> list[Zone]:
+    """Newer surveys win overlaps, then longer claims; equal tags merge.
+
+    A rater who re-surveys a corner exports a short track that overlaps the
+    original, so the survey date decides first (an ITRS "update" is usually
+    the shorter track). Between claims surveyed the same day, or with no
+    date, the longer claim wins: a track rating a whole way at one level
+    beats another track's short tail onto it. Every overlap with different
+    ratings goes to ``overlaps`` for the report.
 
     A leftover of a trimmed claim shorter than the minimum piece is dropped
     (with a note) rather than becoming a sliver. A short claim that was not
-    trimmed at all is kept: a short segment is real data.
+    trimmed at all is kept: a short segment is real data. Result sorted by
+    chainage.
     """
     zones: list[Zone] = []
-    for claim in sorted(claims, key=lambda c: -c.length):
+    for claim in sorted(claims, key=lambda c: (c.surveyed, c.length), reverse=True):
         parts = [(claim.start_m, claim.end_m)]
         for z in zones:
             if z.tags == claim.tags:
@@ -253,8 +316,26 @@ def _resolve_zones(claims: list[Claim], notes: list[str], min_piece_m: float) ->
                     trimmed.append((a, z.start_m))
                 if b > z.end_m:
                     trimmed.append((z.end_m, b))
+                newer = z.surveyed > claim.surveyed
+                overlaps.append(
+                    Overlap(
+                        max(a, z.start_m),
+                        min(b, z.end_m),
+                        list(z.sources),
+                        dict(z.tags),
+                        z.surveyed,
+                        list(claim.sources),
+                        dict(claim.tags),
+                        claim.surveyed,
+                        "newer" if newer else "longer",
+                    )
+                )
                 notes.append(
-                    f"{claim.label} overlaps {', '.join(z.sources)} between "
+                    f"{claim.label} overlaps {sources_text(z.sources)} between "
+                    f"{max(a, z.start_m):.0f} and {min(b, z.end_m):.0f} m with different "
+                    f"ratings; the newer survey ({z.surveyed}) wins"
+                    if newer
+                    else f"{claim.label} overlaps {sources_text(z.sources)} between "
                     f"{max(a, z.start_m):.0f} and {min(b, z.end_m):.0f} m with different "
                     "ratings; the longer claim wins"
                 )
@@ -268,7 +349,7 @@ def _resolve_zones(claims: list[Claim], notes: list[str], min_piece_m: float) ->
                         f"(leftover after overlap, shorter than {min_piece_m:.0f} m)"
                     )
                 continue
-            zones.append(Zone(a, b, dict(claim.tags), list(claim.sources)))
+            zones.append(Zone(a, b, dict(claim.tags), list(claim.sources), claim.surveyed))
     zones.sort(key=lambda z: z.start_m)
     merged: list[Zone] = []
     for z in zones:
@@ -276,6 +357,7 @@ def _resolve_zones(claims: list[Claim], notes: list[str], min_piece_m: float) ->
         if last is not None and last.tags == z.tags and z.start_m <= last.end_m + 0.5:
             last.end_m = max(last.end_m, z.end_m)
             last.sources.extend(s for s in z.sources if s not in last.sources)
+            last.surveyed = max(last.surveyed, z.surveyed)
         else:
             merged.append(z)
     return merged
@@ -302,7 +384,7 @@ def _tidy_zones(zones: list[Zone], length_m: float, min_piece_m: float, notes: l
         gap = b.start_m - a.end_m
         if 0.5 < gap < min_piece_m:
             notes.append(
-                f"{gap:.0f} m gap between {', '.join(a.sources)} and {', '.join(b.sources)} "
+                f"{gap:.0f} m gap between {sources_text(a.sources)} and {sources_text(b.sources)} "
                 f"closed (shorter than {min_piece_m:.0f} m)"
             )
             a.end_m = b.start_m
@@ -313,6 +395,7 @@ def _tidy_zones(zones: list[Zone], length_m: float, min_piece_m: float, notes: l
         if a.tags == b.tags and b.start_m <= a.end_m + 0.5:
             a.end_m = max(a.end_m, b.end_m)
             a.sources.extend(s for s in b.sources if s not in a.sources)
+            a.surveyed = max(a.surveyed, b.surveyed)
             del zones[i + 1]
         else:
             i += 1
@@ -519,7 +602,9 @@ def apply_matches(
         )
         result.ways.append(change)
 
-        zones = _resolve_zones(all_claims[way_id], change.notes, options.min_piece_m)
+        zones = _resolve_zones(
+            all_claims[way_id], change.notes, options.min_piece_m, change.overlaps
+        )
         _tidy_zones(zones, length_m, options.min_piece_m, change.notes)
         change.zones = zones
         if not zones:
@@ -597,9 +682,11 @@ def apply_matches(
             best = ranges_planned[i][2]
             after = dict(piece_way.tags)
             sources: list[str] = []
+            surveyed = ""
             if best is not None:
                 after.update(best.tags)
                 sources = list(best.sources)
+                surveyed = best.surveyed
             pieces.append(
                 Piece(
                     way_id=piece_way.id,
@@ -610,6 +697,7 @@ def apply_matches(
                     tags_before=dict(piece_way.tags),
                     tags_after=after,
                     sources=sources,
+                    surveyed=surveyed,
                 )
             )
             piece_way.tags = after
@@ -618,7 +706,7 @@ def apply_matches(
         for z in zones:
             if id(z) not in covered:
                 change.notes.append(
-                    f"rating from {', '.join(z.sources)} ({z.start_m:.0f} to {z.end_m:.0f} m) "
+                    f"rating from {sources_text(z.sources)} ({z.start_m:.0f} to {z.end_m:.0f} m) "
                     "did not land on any piece after cuts were placed; check in JOSM"
                 )
 

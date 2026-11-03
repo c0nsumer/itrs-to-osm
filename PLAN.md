@@ -612,3 +612,39 @@ building against the real tracks:
   inserted. The matcher now exposes `vertex_places`, and `split.insert_node_at`
   is shared by cuts and points. The wiki draft for the exposure key gained
   `onNode=yes` and two sentences on what a node means (Steve uploads).
+- 2026-Nov-03: a second Copper Harbor batch (35 exports) showed how raters
+  actually work: ITRS can't edit a segment in place, so a corner gets
+  re-rated as a short new track over the original ("Berry Picker (first
+  corner update)", "Plunge Segment Update", "KPT Fanny Hooe Update", "East
+  Whoopidy Part 2 (Segment Upadate)"), long trails arrive in parts that
+  overlap by a few meters at the joins, and one survey came twice under two
+  uuids ("Red Trail" / "Red Trail Sync #2"). Under "the longer claim wins"
+  every one of the updates lost to its original (the Plunge update lost by
+  2 m). Now the newer survey wins an overlap, by `segment_last_mutated_on_utc`,
+  and the longer claim only breaks ties; the report lists each overlap under
+  "Overlapping surveys" with both ratings and dates. An older survey's
+  Exposure point on a stretch a newer survey re-rated is stale and skipped
+  (Berry Picker's E2 point sat on a corner the update rated E1). Re-exports
+  are flagged, not dropped. A point whose vertex sat 1.4 m before its
+  segment's interval (a GPS backtrack on Red Trail) is clamped in, within
+  the snap distance. For ratings already in OSM the workflow stays
+  refuse-then-`--force`, since OSM carries no survey date for these keys;
+  the report now lists adjacent pieces that end up with identical tags
+  under "Pieces that could be combined", and the mapper combines them in
+  JOSM. The tool never combines ways itself (it can't tell its own old cut
+  from one somebody needed). Open question for ITRS and the wiki: a
+  per-way survey date (`check_date:mtb:scale:itrs` or `survey:date`) would
+  let the tool decide updates without `--force`.
+- 2026-Nov-03, later: readability pass on the report after the 35-export
+  batch (1400 lines). The Summary is a table (one row per export, with its
+  per-segment match counts and file name) instead of 35 long bullets; the
+  track sections sit under one "ITRS tracks" heading with the column
+  explanation said once; segment labels from one track collapse to "Track /
+  S002, S004, S005"; "Not applied" groups paved and not-rated segments per
+  track and skips dropped-tail lines for segments that had nothing to
+  write; the changeset comment is capped at OSM's 255 characters ("... and
+  29 more trails"); the HTML page gets a table of contents, sticky table
+  headers, and zebra rows. The constant "date" in the export (2026-02-04 in
+  every file, whatever the survey date) is reported once as the export
+  format date, not as an export date.
+

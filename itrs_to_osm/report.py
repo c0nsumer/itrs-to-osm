@@ -16,11 +16,12 @@ from typing import Any
 
 from .itrs import DIRECTION_ONE_WAY, DIRECTION_TWO_WAY, USE_BIKE_ONLY, USE_SHARED, Segment, Track
 from .match import Interval, MatchOptions, SegmentMatch, TrackMatch
-from .osm import OsmData
+from .osm import OsmData, Way
 from .points import EXPOSURE_TYPE, PointChange, PointOptions, PointsResult
-from .split import ApplyResult, CutOptions, WayChange
+from .split import ApplyResult, CutOptions, WayChange, sources_text
 from .tagging import (
     EXPOSURE_KEY,
+    ITRS_KEY_PREFIX,
     ITRS_KEYS,
     TECH_KEY,
     existing_itrs,
@@ -49,10 +50,9 @@ class RunContext:
 
 def changeset_suggestion(ctx: RunContext) -> tuple[str, str]:
     """(comment, source) to paste into JOSM's upload dialog."""
-    names = ", ".join(t.name for t in ctx.tracks)
     versions = sorted({v for t in ctx.tracks for v in t.itrs_versions})
     dates = sorted({d for t in ctx.tracks for d in t.survey_dates})
-    comment = f"Add ITRS trail ratings (technical difficulty, exposure) for {names}"
+    comment = f"Add ITRS trail ratings (technical difficulty, exposure) for {_trail_list(ctx)}"
     source = "ITRS trail rating survey"
     if versions:
         source += f" (ITRS {', '.join(versions)})"
@@ -60,6 +60,22 @@ def changeset_suggestion(ctx: RunContext) -> tuple[str, str]:
         source += f", surveyed {dates[0]}" + (f" to {dates[-1]}" if len(dates) > 1 else "")
     source += f"; itrs-to-osm {ctx.tool_version}"
     return comment, source
+
+
+CHANGESET_COMMENT_MAX = 255  # OSM's limit on a changeset comment
+
+
+def _trail_list(ctx: RunContext) -> str:
+    """The track names, cut to fit the changeset comment: "A, B, C and 12 more trails"."""
+    names = list(dict.fromkeys(t.name for t in ctx.tracks))
+    prefix = "Add ITRS trail ratings (technical difficulty, exposure) for "
+    room = CHANGESET_COMMENT_MAX - len(prefix)
+    for keep in range(len(names), 0, -1):
+        rest = len(names) - keep
+        text = ", ".join(names[:keep]) + (f" and {rest} more trails" if rest else "")
+        if len(text) <= room:
+            return text
+    return f"{len(names)} trails"
 
 
 # --- Report document model ---------------------------------------------------
@@ -248,6 +264,8 @@ def point_status_text(change: PointChange) -> str:
         return f"refused (node has {change.old})"
     if change.status == "unplaced":
         return f"not placed: {change.reason}"
+    if change.reason.startswith("stale:"):
+        return change.reason
     return f"skipped: {change.reason}" if change.reason else change.status
 
 
@@ -256,14 +274,18 @@ def point_placement_text(change: PointChange) -> str:
     if change.node_id is None:
         return "-"
     if change.kind == "inserted":
-        text = "inserted on the way geometry"
+        text = "new node on the way geometry"
         if change.moved_m >= 0.05:
-            text += f", {change.moved_m:.1f} m along the way from the matched position"
+            text += f", {change.moved_m:.1f} m along the way from the match"
+    elif change.node_id < 0:
+        text = (
+            f"node inserted for another point, {change.moved_m:.1f} m along the way from the match"
+        )
     else:
-        text = f"existing node, {change.moved_m:.1f} m along the way from the matched position"
+        text = f"existing node {change.moved_m:.1f} m along the way from the match"
     return (
-        text + f"; {change.from_point_m:.1f} m from the surveyed point, "
-        f"which sat {change.offset_m:.1f} m off the way"
+        text + f"; {change.from_point_m:.1f} m from the surveyed point "
+        f"({change.offset_m:.1f} m off the way)"
     )
 
 
@@ -304,11 +326,19 @@ def _header(ctx: RunContext) -> list[Block]:
         f"snap {co.snap_m:g} m, snap to junction {co.snap_junction_m:g} m, "
         f"min piece {co.min_piece_m:g} m, force {'on' if co.force else 'off'}"
     )
-    exports = ", ".join(Path(t.source).name for t in ctx.tracks) or "none"
+    files = [Path(t.source).name for t in ctx.tracks]
+    if len(files) > 3:
+        exports = f"{len(files)} exports, listed under Summary"
+    else:
+        exports = ", ".join(files) or "none"
+    formats = sorted(
+        {f"{t.file_version or 'unknown'} ({t.export_date or 'no date'})" for t in ctx.tracks}
+    )
     items: list[Inline] = [
         ["Generated: ", ctx.generated_at],
         ["Tool: itrs-to-osm ", ctx.tool_version],
         ["ITRS data: ", exports],
+        ["ITRS export format: ", ", ".join(formats) or "unknown"],
         ["OSM data: ", source],
         ["Output: ", output],
         ["Thresholds: ", thresholds],
@@ -341,20 +371,52 @@ def _header(ctx: RunContext) -> list[Block]:
 
 
 def _summary(ctx: RunContext) -> list[Block]:
-    blocks: list[Block] = [Heading(2, "Summary")]
-    lines: list[Inline] = []
-    for t in ctx.tracks:
+    blocks: list[Block] = [
+        Heading(2, "Summary"),
+        Para(
+            "One row per ITRS export. Track, Surveyed, ITRS app, Segments, Length, and Exposure "
+            "points come from the export; Match is this tool's result per segment."
+        ),
+    ]
+    rows: list[list[Inline]] = []
+    for t, tm in zip(ctx.tracks, ctx.matches):
         versions = ", ".join(t.itrs_versions) or "unknown"
         dates = ", ".join(t.survey_dates) or "unknown"
         length = t.length_m if t.length_m is not None else sum(map(segment_length, t.segments))
-        lines.append(
+        counts = [segment_status(sm) for sm in tm.segments]
+        match = ", ".join(
+            f"{counts.count(k)} {k}"
+            for k in ("matched", "partial", "unmatched", "not applied")
+            if counts.count(k)
+        )
+        exposure = sum(p.point_type == EXPOSURE_TYPE for p in t.points)
+        rows.append(
             [
                 Strong(t.name),
-                f": ITRS export from app version {versions}, surveyed {dates}, exported "
-                f"{t.export_date or 'unknown'}, {len(t.segments)} segments, {length:.0f} m",
+                dates,
+                versions,
+                str(len(t.segments)),
+                f"{length:.0f} m",
+                match or "-",
+                str(exposure) if exposure else "-",
+                Code(Path(t.source).name),
             ]
         )
-    blocks.append(ItemList(lines))
+    blocks.append(
+        Table(
+            [
+                "Track",
+                "Surveyed",
+                "ITRS app",
+                "Segments",
+                "Length",
+                "Match",
+                "Exposure points",
+                "File",
+            ],
+            rows,
+        )
+    )
 
     statuses = [segment_status(sm) for tm in ctx.matches for sm in tm.segments]
     r = ctx.result
@@ -369,6 +431,7 @@ def _summary(ctx: RunContext) -> list[Block]:
         f"OSM nodes added: {r.nodes_added + pts.nodes_added}",
         f"OSM relations updated: {r.relations_modified}",
         _exposure_totals(ctx),
+        f"Overlapping surveys: {len(r.overlaps)}" + (" (see Advisories)" if r.overlaps else ""),
         f"Refusals: {len(r.refusals) + len(pts.refusals)}",
     ]
     blocks.append(Para(Strong("Totals:")))
@@ -444,17 +507,21 @@ def _name_match(tm: TrackMatch) -> Inline:
     return [Strong("Name match:"), " ", *_join(parts, "; ")]
 
 
-def _track_section(ctx: RunContext, tm: TrackMatch) -> list[Block]:
-    t = tm.track
-    blocks: list[Block] = [
-        Heading(2, f"ITRS track: {t.name}"),
+def _tracks_intro() -> list[Block]:
+    return [
+        Heading(2, "ITRS tracks"),
         Para(
-            "Segment, Tech, Exposure, Type, Use, Direction and Length come from the ITRS "
-            "export. Match, OSM way(s) and Offset are this tool's result: which OSM way "
-            "each surveyed segment landed on, and how far the surveyed line sits from it "
-            "(90th percentile)."
+            "One section per ITRS export. Segment, Tech, Exposure, Type, Use, Direction and "
+            "Length come from the ITRS export. Match, OSM way(s) and Offset are this tool's "
+            "result: which OSM way each surveyed segment landed on, and how far the surveyed "
+            "line sits from it (90th percentile)."
         ),
     ]
+
+
+def _track_section(ctx: RunContext, tm: TrackMatch) -> list[Block]:
+    t = tm.track
+    blocks: list[Block] = [Heading(3, t.name)]
     rows: list[list[Inline]] = []
     for sm in tm.segments:
         s = sm.segment
@@ -552,7 +619,7 @@ def _ways_section(ctx: RunContext) -> list[Block]:
                         str(p.node_count),
                         _itrs_tags_cell(p.tags_before),
                         _itrs_tags_cell(p.tags_after, set(p.changed)),
-                        ", ".join(p.sources) or "none (outside the track)",
+                        sources_text(p.sources) or "none (outside the track)",
                     ]
                 )
             blocks.append(
@@ -573,18 +640,20 @@ def _ways_section(ctx: RunContext) -> list[Block]:
         for rc in w.relations:
             rel = ctx.data.relations.get(rc.relation_id)
             rtype = rel.tags.get("type", "?") if rel else "?"
-            how = (
-                "pieces inserted, direction unknown"
-                if rc.direction == "unknown"
-                else f"pieces inserted {rc.direction}"
-            )
+            if rc.direction == "unknown":
+                how = (
+                    "pieces inserted; their direction is unknown (the neighboring members "
+                    "were not downloaded), so check the order in JOSM"
+                )
+            else:
+                how = f"pieces inserted {rc.direction}"
             line = f"relation {rc.relation_id} {rc.label} ({rtype}): {how}"
             if rc.role:
                 line += (
                     f"; the pieces carry role '{rc.role}', copied from the original member "
                     "(a validator warning about this role is about the existing tagging)"
                 )
-            if rc.warning:
+            if rc.warning and rc.direction != "unknown":
                 line += f"; warning: {rc.warning}"
             items.append(line)
         for r in w.refusals:
@@ -592,7 +661,7 @@ def _ways_section(ctx: RunContext) -> list[Block]:
                 [
                     Strong("Refused: "),
                     f"{r.key} is {r.old} on this way, the survey says {r.new} "
-                    f"(from {', '.join(r.sources)}); not changed",
+                    f"(from {sources_text(r.sources)}); not changed",
                 ]
             )
         ids = {w.way_id, *(p.way_id for p in w.pieces)}
@@ -700,50 +769,68 @@ def _nodes_section(ctx: RunContext) -> list[Block]:
 
 
 def _not_applied(ctx: RunContext) -> list[Block]:
+    """ITRS data that produced no edit, grouped so a long batch stays readable.
+
+    Per track: segments the tool had nothing to write for (paved road, not
+    rated) are listed together, and a dropped tail is only worth a line when
+    the segment had a rating to apply.
+    """
     mo = ctx.match_options
     lines: list[Inline] = []
     for tm in ctx.matches:
+        paved: list[str] = []
+        paved_ways: list[int] = []
+        unrated: dict[str, list[str]] = {}  # key -> segment names
         for sm in tm.segments:
             seg = sm.segment
             label = segment_label(tm.track, seg)
-            if sm.status == "unmatched":
-                lines.append(f"{label}: unmatched ({'; '.join(sm.reasons) or 'no reason'})")
-                continue
-            for iv in sm.dropped:
-                if iv.length < mo.min_piece_m:
-                    why = f"it is shorter than the {mo.min_piece_m:g} m minimum piece"
-                else:
-                    why = (
-                        f"its 90th percentile offset of {iv.p90_offset:.1f} m exceeds "
-                        f"{mo.max_offset_m:g} m"
-                    )
-                applied = ", ".join(_way_title(ctx, w) for w in sm.way_ids)
-                lines.append(
-                    f"{label}: the {iv.place} {iv.length:.0f} m of this {segment_length(seg):.0f} m "
-                    f"segment ran onto {_way_title(ctx, iv.way_id)}. That stretch stays "
-                    f"untagged because {why}. The rest of the segment was applied to {applied}."
-                )
-            if sm.unmatched_vertices:
-                lines.append(
-                    f"{label}: {sm.unmatched_vertices} of {sm.total_vertices} vertices "
-                    "off-network (no way within the corridor there)"
-                )
             skipped = skipped_keys(seg)
+            writes_nothing = nothing_to_write(seg)
+            if sm.status == "unmatched":
+                if not writes_nothing:
+                    lines.append(f"{label}: unmatched ({'; '.join(sm.reasons) or 'no reason'})")
+            elif not writes_nothing:
+                for iv in sm.dropped:
+                    if iv.length < mo.min_piece_m:
+                        why = f"it is shorter than the {mo.min_piece_m:g} m minimum piece"
+                    else:
+                        why = (
+                            f"its 90th percentile offset of {iv.p90_offset:.1f} m exceeds "
+                            f"{mo.max_offset_m:g} m"
+                        )
+                    applied = ", ".join(_way_title(ctx, w) for w in sm.way_ids)
+                    lines.append(
+                        f"{label}: the {iv.place} {iv.length:.0f} m of this "
+                        f"{segment_length(seg):.0f} m segment ran onto "
+                        f"{_way_title(ctx, iv.way_id)}. That stretch stays untagged because "
+                        f"{why}. The rest of the segment was applied to {applied}."
+                    )
+                if sm.unmatched_vertices:
+                    lines.append(
+                        f"{label}: {sm.unmatched_vertices} of {sm.total_vertices} vertices "
+                        "off-network (no way within the corridor there)"
+                    )
             if seg.is_paved_road:
-                ways = ", ".join(way_ref(w) for w in sm.way_ids)
-                lines.append(f"{label} on {ways}: {skipped[0][1]}")
+                paved.append(seg.name)
+                paved_ways += [w for w in sm.way_ids if w not in paved_ways]
                 continue
             for key, reason in skipped:
-                lines.append([f"{label}: ", Code(key), f" {reason}"])
+                unrated.setdefault(f"{key} {reason}", []).append(seg.name)
+        if paved:
+            on = f" on {', '.join(way_ref(w) for w in paved_ways)}" if paved_ways else ""
+            lines.append(
+                f"{tm.track.name} / {', '.join(paved)}{on}: paved road, ITRS ratings are not "
+                "applied to surfaced roads"
+            )
+        for what, names in unrated.items():
+            key, _, reason = what.partition(" ")
+            lines.append([f"{tm.track.name} / {', '.join(names)}: ", Code(key), f" {reason}"])
     for w in ctx.result.ways:
         for r in w.refusals:
             lines.append(
-                f"{', '.join(r.sources)}: nothing written to {way_ref(w.way_id)}, existing "
+                f"{sources_text(r.sources)}: nothing written to {way_ref(w.way_id)}, existing "
                 f"{r.key}={r.old} differs from the survey's {r.new} (refused)"
             )
-        for n in w.notes:
-            if "longer claim wins" in n:
-                lines.append(f"{way_ref(w.way_id)}: {n}")
     if not ctx.point_options.enabled:
         if ctx.points.changes:
             lines.append(
@@ -777,7 +864,7 @@ def _overwritten(ctx: RunContext) -> list[Inline]:
                 ref = way_ref(p.way_id) if p.way_id > 0 else f"new way {p.way_id}"
                 out.append(
                     f"{ref} ({w.name or 'unnamed'}): {key} {old} -> {new} "
-                    f"(from {', '.join(p.sources) or '?'})"
+                    f"(from {sources_text(p.sources) or '?'})"
                 )
     for c in ctx.points.changes:
         if c.status == "overwritten":
@@ -820,9 +907,16 @@ def _direction_mismatches(ctx: RunContext) -> list[Inline]:
                     continue
                 found.setdefault((way_id, msg), []).append(seg.name)
     return [
-        f"{_way_title(ctx, way_id)}: {msg} ({', '.join(segs)})"
+        f"{_way_title(ctx, way_id)}: {msg} ({_segment_list(segs)})"
         for (way_id, msg), segs in found.items()
     ]
+
+
+def _segment_list(names: list[str]) -> str:
+    unique = list(dict.fromkeys(names))
+    if len(unique) > 6:
+        return f"{len(unique)} segments, {unique[0]} to {unique[-1]}"
+    return ", ".join(unique)
 
 
 def _use_mismatches(ctx: RunContext) -> list[Inline]:
@@ -857,7 +951,7 @@ def _use_mismatches(ctx: RunContext) -> list[Inline]:
                 for msg in msgs:
                     found.setdefault((way_id, msg), []).append(seg.name)
     return [
-        f"{_way_title(ctx, way_id)}: {msg} ({', '.join(segs)})"
+        f"{_way_title(ctx, way_id)}: {msg} ({_segment_list(segs)})"
         for (way_id, msg), segs in found.items()
     ]
 
@@ -918,13 +1012,98 @@ def _rating_points(ctx: RunContext) -> list[Block]:
     return blocks or [Para("None.")]
 
 
+def _short_tags(tags: dict[str, str]) -> str:
+    """``technical_difficulty 3, exposure 1`` for a set of ITRS tags."""
+    parts = [
+        f"{k.removeprefix(ITRS_KEY_PREFIX)} {v}"
+        for k, v in sorted(tags.items(), key=lambda kv: _key_order(kv[0]))
+    ]
+    return ", ".join(parts) or "no rating"
+
+
+def _overlapping_surveys(ctx: RunContext) -> list[Inline]:
+    """One line per stretch where two tracks rate the same way differently."""
+    out: list[Inline] = []
+    for w, o in ctx.result.overlaps:
+        if o.rule == "newer":
+            rule = "the newer survey wins"
+        elif o.winner_surveyed or o.loser_surveyed:
+            rule = "same survey date, so the longer claim wins"
+        else:
+            rule = "no survey dates, so the longer claim wins"
+        out.append(
+            f"{way_ref(w.way_id)} ({w.name or 'unnamed'}), {o.start_m:.0f} to {o.end_m:.0f} m "
+            f"({o.length:.0f} m): {sources_text(o.winner)} ({_short_tags(o.winner_tags)}, "
+            f"surveyed {o.winner_surveyed or 'unknown'}) over {sources_text(o.loser)} "
+            f"({_short_tags(o.loser_tags)}, surveyed {o.loser_surveyed or 'unknown'}); {rule}"
+        )
+    return out
+
+
+def _memberships(data: OsmData, way: Way) -> set[tuple[int, str]]:
+    return {
+        (r.id, m.role)
+        for r in data.parent_relations(way)
+        for m in r.members
+        if m.type == "way" and m.ref == way.id
+    }
+
+
+def _combinable(ctx: RunContext) -> list[Inline]:
+    """Pieces this run touched that now match a neighbor tag for tag.
+
+    An earlier survey's cut can stop mattering once a newer survey rates
+    both sides alike. The tool never combines ways (it can't tell a cut it
+    made last time from one somebody needed), so the report points them out.
+    """
+    data = ctx.data
+    seen: set[tuple[int, int]] = set()
+    out: list[Inline] = []
+    for w in ctx.result.modified_ways:
+        for p in w.pieces:
+            way = data.ways.get(p.way_id)
+            if way is None or len(way.nodes) < 2 or way.nodes[0] == way.nodes[-1]:
+                continue
+            if not existing_itrs(way.tags):
+                continue
+            for end in (way.nodes[0], way.nodes[-1]):
+                parents = data.parent_ways(end)
+                others = [x for x in parents if x.id != way.id]
+                if len(parents) != 2 or len(others) != 1:
+                    continue
+                other = others[0]
+                if other.tags != way.tags or other.nodes[0] == other.nodes[-1]:
+                    continue
+                if _memberships(data, other) != _memberships(data, way):
+                    continue
+                head_to_tail = (end == way.nodes[-1] and other.nodes[0] == end) or (
+                    end == way.nodes[0] and other.nodes[-1] == end
+                )
+                if "oneway" in way.tags and not head_to_tail:
+                    continue
+                key = (min(way.id, other.id), max(way.id, other.id))
+                if key in seen:
+                    continue
+                seen.add(key)
+                refs = [way_ref(x.id) if x.id > 0 else f"new way {x.id}" for x in (way, other)]
+                out.append(
+                    f"{refs[0]} and {refs[1]} "
+                    f"({w.name or 'unnamed'}) meet at {node_ref(end)} with identical tags. If "
+                    "nothing else needs that cut, select both in JOSM and use "
+                    "Tools -> Combine Way."
+                )
+    return out
+
+
 def _advisories(ctx: RunContext) -> list[Block]:
     blocks: list[Block] = [
         Heading(2, "Advisories"),
         Para("Where the ITRS survey and the OSM data disagree, with the ITRS detail behind it."),
     ]
     for title, lines in (
+        ("Overlapping surveys", _overlapping_surveys(ctx)),
         ("Existing ITRS values overwritten", _overwritten(ctx)),
+        ("Pieces that could be combined", _combinable(ctx)),
         ("Direction", _direction_mismatches(ctx)),
         ("Use and access", _use_mismatches(ctx)),
     ):
@@ -977,7 +1156,7 @@ def _review_steps(ctx: RunContext) -> list[Block]:
 
 def build_report(ctx: RunContext) -> list[Block]:
     """The whole report as blocks, in order, for any renderer."""
-    blocks = _header(ctx) + _summary(ctx)
+    blocks = _header(ctx) + _summary(ctx) + _tracks_intro()
     for tm in ctx.matches:
         blocks += _track_section(ctx, tm)
     blocks += _ways_section(ctx)

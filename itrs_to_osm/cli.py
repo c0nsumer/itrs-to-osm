@@ -14,7 +14,7 @@ from pathlib import Path
 
 from . import __version__
 from .geo import buffer_bbox, merge_bboxes
-from .itrs import ItrsError, Track, load_track
+from .itrs import ItrsError, Track, flag_reexports, load_track
 from .match import MatchOptions, match_track
 from .osm import Bounds, OsmData, read_osm_file, read_osm_xml, write_josm_file
 from .overpass import DEFAULT_ENDPOINT, OverpassError, fetch_area
@@ -131,6 +131,7 @@ def run(args: argparse.Namespace) -> int:
         except ItrsError as e:
             print(f"error: {e}", file=sys.stderr)
             return EXIT_ERROR
+    flag_reexports(tracks)
     for t in tracks:
         for w in t.warnings:
             log.warning("%s: %s", t.name, w)

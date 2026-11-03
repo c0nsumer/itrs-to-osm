@@ -47,6 +47,7 @@ from .report import (
     segment_status,
     way_ref,
 )
+from .split import sources_text
 from .tagging import (
     COLOR_UNMATCHED,
     EXPOSURE_KEY,
@@ -199,7 +200,7 @@ def map_data(ctx: RunContext) -> dict[str, Any]:
                 f"tags after: {_tags_text(p.tags_after)}",
                 "exposure: "
                 + (rating_text(EXPOSURE_KEY, int(exposure)) if exposure else "not tagged"),
-                f"from: {', '.join(p.sources) or '-'}",
+                f"from: {sources_text(p.sources) or '-'}",
             ]
             title = f"{piece_ref(p.way_id, p.keeps_id and len(w.pieces) > 1)} {w.name}".strip()
             link = OSM_WAY_URL.format(p.way_id) if p.way_id > 0 else None
@@ -362,7 +363,12 @@ h3 { margin-top: 24px; font-size: 1.05em; }
 .table { overflow-x: auto; }
 table { border-collapse: collapse; font-size: 0.9em; margin: 8px 0; }
 th, td { border: 1px solid #ccc; padding: 4px 8px; text-align: left; vertical-align: top; }
-th { background: #f3f3f3; }
+th { background: #f3f3f3; position: sticky; top: 0; }
+tbody tr:nth-child(even) { background: #fafafa; }
+.toc { background: #f6f6f6; border: 1px solid #ddd; padding: 8px 16px; margin: 16px 0;
+  font-size: 0.95em; }
+.toc ul { margin: 4px 0 0; padding-left: 20px; }
+.toc li { margin: 2px 0; }
 pre { background: #f6f6f6; border: 1px solid #ddd; padding: 8px; overflow-x: auto;
   white-space: pre-wrap; }
 code { background: #f3f3f3; padding: 0 3px; }
@@ -379,13 +385,46 @@ code { background: #f3f3f3; padding: 0 3px; }
 """
 
 
+def _toc(blocks: list[Block]) -> str:
+    """Links to every top-level section, with the tracks on one line."""
+    used: set[str] = set()
+    entries: list[tuple[int, str, str]] = []
+    for block in blocks:
+        if not isinstance(block, Heading) or block.level == 1:
+            continue
+        slug = base = _slug(block.text)
+        n = 2
+        while slug in used:
+            slug, n = f"{base}-{n}", n + 1
+        used.add(slug)
+        entries.append((block.level, block.text, slug))
+    tops = [(t, s) for level, t, s in entries if level == 2]
+    tracks: list[tuple[str, str]] = []
+    in_tracks = False
+    for level, text, slug in entries:
+        if level == 2:
+            in_tracks = text == "ITRS tracks"
+        elif in_tracks and level == 3:
+            tracks.append((text, slug))
+    items = []
+    for text, slug in tops:
+        line = f'<a href="#{slug}">{_e(text)}</a>'
+        if text == "ITRS tracks" and tracks:
+            line += ": " + " · ".join(f'<a href="#{s}">{_e(t)}</a>' for t, s in tracks)
+        items.append(f"<li>{line}</li>")
+    return '<nav class="toc"><strong>Contents</strong><ul>' + "".join(items) + "</ul></nav>"
+
+
 def render_html(ctx: RunContext) -> str:
     blocks = build_report(ctx)
     split = next(
         (i for i, b in enumerate(blocks) if isinstance(b, Heading) and b.level == 2),
         len(blocks),
     )
-    title = "itrs-to-osm report: " + ", ".join(t.name for t in ctx.tracks)
+    names = [t.name for t in ctx.tracks]
+    if len(names) > 3:
+        names = names[:3] + [f"and {len(names) - 3} more"]
+    title = "itrs-to-osm report: " + ", ".join(names)
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -398,6 +437,7 @@ def render_html(ctx: RunContext) -> str:
 </head>
 <body>
 {render_html_blocks(blocks[:split])}
+{_toc(blocks)}
 <div id="map"></div>
 {render_html_blocks(blocks[split:])}
 <script>
