@@ -1,197 +1,266 @@
 # itrs-to-osm
 
-Certified ITRS trail raters walk or ride a trail with the ITRS app and get a
-GeoJSON export: one line per rated segment, each with a technical difficulty
-and an exposure rating. Those trails are usually already in OpenStreetMap,
-but the surveyed track never lines up exactly with the OSM way, one way
-often spans a dozen segments with different ratings, and copying it all over
-by hand means splitting ways and typing tags for an afternoon.
+itrs-to-osm is a utility tool to help bridge data between the [International
+Trail Rating System (ITRS)](https://itrs.bike/) survey app and OpenStreetMap
+(OSM). It is a niche tool to be used by a trail mapper who has obtained an
+ITRS GeoJSON and wishes to add the trail ratings to an existing OSM way. It
+does not create new ways.
 
-This tool does the mechanical part without doing mechanical edits. It finds the OSM ways under the surveyed
-track, splits them where the rating changes, writes the ITRS tags, and hands
-you a JOSM file plus a report. You (a human) reviews the output, the data in in JOSM and then uploads it.
-This keeps a human in the loop.
+Because ITRS surveys result in a new line, it usually won't match the OSM way
+exactly. This tool uses multivariable matching to the OSM way, then splitting
+it (as needed) to appropriately apply the ITRS tags to each portion. This has
+a significant time savings over manually adding the ITRS tags.
 
-As of this writing (2026-Nov-02) it handles exports from ITRS app versions
-4.4 through 5.3 and writes these two tags on ways:
+This tool makes no changes to OSM itself. It downloads the current OSM data
+from Overpass, adjusts it based on the ITRS data, and outputs a `.osm` file
+that the mapper opens in [JOSM](https://josm.openstreetmap.de/), reviews, and
+uploads. By having a human review it avoids many of the mechanical edit
+pitfalls while providing a significant automation benefit.
 
-- `segment_tech_rating` -> `mtb:scale:itrs:technical_difficulty` (1 to 5)
-- `segment_max_exposure` -> `mtb:scale:itrs:exposure` (1 to 4)
+As of v0.3.0 it handles GeoJSON exports from ITRS app versions 4.4 through 5.3
+and writes these two tags on ways:
 
-It also writes one tag on nodes. An ITRS export carries an Exposure point
-for each exposed section rated blue or worse (the section that gives the
-segment its exposure rating). The tool tags a node of the matched way at
-each one:
+- `segment_tech_rating` -> [`mtb:scale:itrs:technical_difficulty`](https://wiki.openstreetmap.org/wiki/Key:mtb:scale:itrs:technical_difficulty) (1 to 5)
+- `segment_max_exposure` -> [`mtb:scale:itrs:exposure`](https://wiki.openstreetmap.org/wiki/Key:mtb:scale:itrs:exposure) (1 to 4)
 
-- `point_exposure_rating` -> `mtb:scale:itrs:exposure` (1 to 4) on a node
+It also writes one tag on nodes:
 
-So the way says how exposed the worst spot along it is, and the node says
-where that spot is. Nothing else from the point goes into OSM; the length,
-trail bed width, off-camber, and photo links stay in the report.
+- `point_exposure_rating` -> [`mtb:scale:itrs:exposure`](https://wiki.openstreetmap.org/wiki/Key:mtb:scale:itrs:exposure) (1 to 4) on a node
 
-A value of 0 in the export means "not rated" and is never written. Segments
-whose track type is "Paved/surfaced road" are never tagged either, since ITRS
-itself doesn't present a rating on surfaced roads. Endurance and wilderness
-aren't in the exports, so they're not handled. Neither are the other point
-types (water, river crossings, rockfall, wildlife, general remarks); they're
-listed in the report only.
+No other data is copied from ITRS to OSM. The rest of a point (length, trail
+bed width, off-camber, and photo links) stays in the report.
+
+A value of 0 in the ITRS GeoJSON means "not rated" and thus is never
+translated to OSM. Segments whose track type is "Paved/surfaced road" are
+never tagged either, since ITRS itself doesn't present a rating on surfaced
+roads.
+
+(In the future it may be extended to handle other ITRS points such as Water
+fountains, River Crossings, Rock Fall Zones, Wildlife, or other general
+annotations. These are listed in the output report, but not processed.)
 
 ## Install
 
-You'll need Python 3.11 or newer. Then:
+Python 3.11 or newer, then:
 
 ```
 pipx install git+https://github.com/c0nsumer/itrs-to-osm
 ```
 
-(or `uv tool install git+https://github.com/c0nsumer/itrs-to-osm`, or clone
-it and `pip install .` into a venv). That gives you an `itrs-to-osm` command
-on macOS, Linux, and Windows.
+`uv tool install git+https://github.com/c0nsumer/itrs-to-osm` works too, as
+does a clone and `pip install .` in a venv. Each gives you an `itrs-to-osm`
+command on macOS, Linux, and Windows.
 
 ## Use
 
-Run it on an export, from the directory holding the file:
+One export, run from the directory holding the file:
 
 ```
 itrs-to-osm "geojson-export_Loam Rider.geojson"
 ```
 
-That writes two files next to the input: `Loam Rider.osm` (the JOSM file) and
-`Loam Rider.report.md` (what changed, what didn't, and why). Add `--html` for
-`Loam Rider.report.html`, the same report with a map.
+This writes `Loam Rider.osm` (the JOSM file) and `Loam Rider.report.md` (what
+changed, what didn't, and why) next to the input. `--html` adds `Loam
+Rider.report.html`, the same report with a map.
 
-Several exports at once go into one JOSM file, which matters when two tracks
-touch the same way (a track's tail often runs a few meters onto the
-neighboring trail, and "Pt. 1" of a trail implies a Pt. 2 on the same way).
-Separate files would each modify that way from the same base version, and
-the second upload would conflict. It also matters when one export updates
-part of another; see "Re-surveys and updates" below:
+Several exports go into one JOSM file:
 
 ```
 itrs-to-osm geojson-export_*.geojson --out copper-harbor
 ```
 
-A run goes in this order, whether it holds one export or forty: every export
-is parsed first, then one OSM download covers all of them (areas that
-overlap merge into one request), each track is matched to ways on its own,
-then every track's claims on each way are resolved together (where ratings
-differ, the newer survey wins, then the longer claim), the ways are cut and
-tagged, the Exposure points get their nodes, and the report is written. So
-the order of the files on the command line doesn't matter, and a track
-matched in one run comes out the same in a batch.
+Use one file per batch whenever two tracks can touch the same way (a tail onto
+the neighboring trail, "Pt. 1" and "Pt. 2" of one trail, an update that
+overlaps its original). Separate files would each edit that way from the same
+base version, and the second upload would conflict.
 
-The first run downloads the area from the Overpass API and caches it under
-`./cache`, so reruns are offline and reproducible. `--refresh` downloads
-again. `--osm area.osm` skips Overpass and uses a file you saved from JOSM
-instead (handy when Overpass is busy, which it often is).
+A run goes in this order, for one export or forty:
 
-Then open the `.osm` in JOSM:
+1. Parse every export.
+2. Download the OSM data once (overlapping areas merge into one request).
+3. Match each track to ways on its own.
+4. Resolve every track's claims on each way together. Where ratings differ,
+   the newer survey wins, then the longer claim.
+5. Cut and tag the ways, place the Exposure nodes, write the report.
+
+So the order of the files on the command line doesn't matter.
+
+The first run downloads from the Overpass API and caches under `./cache`, so
+reruns are offline and reproducible. `--refresh` downloads again. `--osm
+area.osm` uses a file saved from JOSM instead (handy when Overpass is busy,
+which it often is).
+
+Suggested workflow begins with opening the `.osm` in JOSM:
 
 1. Search for `modified` to select everything the tool changed.
-2. Run the validator and look at each split; the report lists every cut and
-   whether it snapped to an existing node or inserted one.
-3. Look at each exposure node; the report lists where each one landed and
-   how far it is from the surveyed point.
-4. Paste the suggested changeset comment and source from the report into the
-   upload dialog, and upload. Only the modified and new elements go up.
+2. Run JOSM's validator on that selection and fix or explain each warning.
+3. Check each split against the report's "OSM ways changed" section, which
+   lists every cut and whether it snapped to an existing node or inserted
+   one.
+4. Check each exposure node. The report's "OSM nodes changed" section has a
+   row per ITRS Exposure point: the OSM node that got the tag (existing or
+   new), the way it sits on, and the distance from the surveyed point to
+   that node. The node should sit on the trail at the exposed spot, not on
+   a junction.
+5. Paste the changeset comment and source from the end of the report into
+   the upload dialog, and upload. Only the modified and new elements go up.
 
 ## How it decides
 
-The surveyed track sits a few meters off the OSM way, flickers between ways
-at junctions and alongside parallel trails, and sometimes runs onto a
-neighboring trail at either end. So per-point "nearest way" is wrong often
-enough to matter. Instead the tool decodes the whole track at once (a small
-Viterbi), preferring to stay on one way, to switch only at a shared node,
-and to favor ways whose name (or whose route relation's name) matches the
-track name and whose highway class fits the ITRS track type.
+The short version: a rater's track is a GNSS recording, and GNSS recordings
+wander. On a wooded trail the line sits a few meters to one side of the
+real trail, drifts further under cliffs and tree cover, and at a junction
+can look like it went down the wrong fork for a few meters. The OSM way is
+the better geometry (it's been mapped and refined already), so the tool
+never moves it. Instead it works out which OSM ways the track followed, where
+along those ways each ITRS rating starts and stops, and writes the ratings
+there. The recorded line is only used for that matching; no part of it is
+written to OSM. Everything the tool decides is listed in the report, and the
+thresholds below are the ones it uses when the data is ambiguous.
 
-Rating changes almost never fall on an existing OSM node (in the sample
-tracks, 3 of 31 were within 15 m of a junction). So a cut snaps to a
-junction node within 15 m, else to any node within 5 m, else inserts a new
-node on the way's own geometry. The OSM geometry is never moved. Adjacent
-segments with the same rating are merged before cutting, and a short tail
-onto another way (under 15 m, or badly offset) is dropped and reported
-rather than turned into a sliver. Ways are split the way JOSM does it: the
-piece with the most nodes keeps the id, every piece gets the original tags,
-and parent relations get the pieces inserted in order.
+**Matching.** Because of that wander, picking the nearest way for each
+point of the track doesn't work: the choice flips between parallel trails,
+jumps to the crossing trail at every junction, and lands on the neighbor
+wherever the rater overshot the end. So the tool decodes the whole track at
+once (a small Viterbi, the same idea GPS map-matching uses). It finds the
+path through the OSM network that best explains the recording as a whole,
+preferring to stay on one way, to switch only at a node the two ways share,
+and to favor ways whose name (or route relation name) matches the track and
+whose highway class fits the ITRS track type. A single stray fix can't pull
+the match onto another trail, because the rest of the track still argues
+for the right one.
 
-Exposure points sit on a vertex of the surveyed track, and the decode has
-already put that vertex on a way, so the node goes where the match says,
-not on the nearest way to the point. An existing node within 5 m gets the
-tag, unless it's shared with another trail (which trail would it belong to?)
-or already carries other tags such as a gate. Otherwise a new node is
-inserted on the way's own geometry. In the sample tracks, 28 of 30 points
-landed on an existing node.
+**Cuts.** A rating change almost never falls on an existing node (3 of 31 in
+the sample tracks were within 15 m of a junction). A cut snaps to a junction
+node within 15 m, else to any node within 5 m, else inserts a node on the
+way's own geometry. Geometry is never moved. Adjacent segments with the same
+rating merge before cutting. A tail onto another way shorter than 15 m, or
+badly offset, is dropped and reported rather than turned into a sliver. Splits
+follow JOSM's rules: the piece with the most nodes keeps the id, every piece
+keeps the original tags, and parent relations get the pieces in order.
 
-If a way or node already carries a different ITRS value, the tool refuses
-to touch it, says so in the report, and exits with status 2. `--force`
-overwrites and records the old value (the next section has the workflow).
-One thing it can't do is remove a node for a point that ITRS no longer
-exports, so the report asks you to look for stale ones.
+**Exposure nodes.** A point sits on a vertex of the surveyed track, and the
+decode has already put that vertex on a way, so the node goes where the match
+says, not on the nearest way to the point. An existing node within 5 m gets
+the tag unless it's a junction (which trail would it belong to?) or carries
+other tags, such as a gate. Otherwise a node is inserted. In the sample
+tracks, 28 of 30 points landed on an existing node.
 
-All the thresholds are flags (`--corridor`, `--max-offset`, `--snap`,
-`--snap-junction`, `--min-piece`), and `--name` or `--way-id` pin the match
-when the rater's name and the mapper's name disagree. `--exposure-min`
-raises the rating a point needs before it gets a node (the default, 2, is
-also ITRS's export threshold, so everything exported is written), and
-`--no-exposure-nodes` turns the node step off. `--dry-run` matches and
-reports without writing a `.osm`.
+**Values already in OSM.** Between two exports in the same run, the newer
+survey wins (see "Re-surveys and updates"). A value already in OSM carries
+no survey date, only the date of the edit that put it there, so the tool
+compares the export's survey time with the element's last OSM edit. If the
+survey is newer than that edit, the value in OSM came from an older survey,
+and the tool replaces it and says so in the report. If the element was
+edited after the survey, there's no telling which is newer, so the tool
+refuses, says so in the report, and exits with status 2. `--force`
+overwrites those too and records the old value. The tool can't remove a
+node for a point ITRS no longer exports, so the report asks you to look for
+stale ones.
+
+**Flags.** `--corridor`, `--max-offset`, `--snap`, `--snap-junction`, and
+`--min-piece` set the thresholds above. `--name` or `--way-id` pin the match
+when the rater's and the mapper's names disagree. `--exposure-min` raises the
+rating a point needs for a node (the default, 2, is ITRS's own export
+threshold). `--no-exposure-nodes` turns the node step off. `--dry-run` matches
+and reports without writing a `.osm`.
 
 ## Re-surveys and updates
 
-ITRS can't edit a segment in place. When a rater re-rates a corner, or
-re-surveys part of a trail after work on it, the fix arrives as a short new
+ITRS can't edit a segment in place. A re-rated corner arrives as a short new
 export that overlaps the original ("Berry Picker" plus "Berry Picker (first
-corner update)" at Copper Harbor). Long trails also arrive in parts
-("Garden Brook Part 1", "Pt. 2", "Part 3"), and the parts overlap by a few
-meters where one survey ended and the next began.
+corner update)"), long trails arrive in parts that overlap a few meters at the
+joins, and one survey can turn up twice under two names. The rules for all of
+that:
 
-Where two tracks in a batch rate the same stretch of a way differently, the
-newer survey wins (each segment carries a `segment_last_mutated_on_utc`
-date). Between surveys of the same date, the longer claim wins, which is
-what you want at a junction where one track's tail runs a few meters onto
-the other's trail. Every such overlap is listed in the report under
-"Overlapping surveys" with both ratings, both dates, and which one won, so
-check that list first when a batch holds updates. The older survey's
-Exposure points on a re-rated stretch are stale (the newer survey exported
-its own) and get no node; the report says so.
+- **The newer survey wins** where two exports in the same run rate the
+  same stretch differently, by each segment's `segment_last_mutated_on_utc`
+  timestamp, so an afternoon re-rating beats the morning's full run. Equal
+  timestamps fall back to the longer claim, which is right for a tail onto
+  a neighbor. Every overlap is listed under "Overlapping surveys" with both
+  ratings, both dates, and the winner. Read that list first. (A value
+  already in OSM is compared with the element's last OSM edit instead;
+  see below.)
+- **Exposure points follow suit.** An older survey's point on a spot a newer
+  track also covers is stale and gets no node, even when the two agree on
+  the way's rating: the newer survey exported its own points there. Stale
+  points are listed under "Not applied". Older points beyond the newer
+  track's reach are kept.
+- **Reruns over already-split ways** work. A short segment at a piece
+  boundary now matches as a tail onto the neighboring piece; its point still
+  gets a node there when that piece is the same trail (a way named like one
+  the track kept), and stays unplaced when it's a different trail (a
+  junction overshoot). A point the match can't place at all is looked up by
+  location: an existing exposure node within the snap distance counts as its
+  node, "already tagged (found by location ...)", or is refused if the value
+  differs.
+- **A node rated worse than its way** can happen when the point's own
+  segment didn't land there (a sliver dropped after an overlap, a short gap
+  closed from the neighbor). ITRS rates a way as its worst section, so it
+  shouldn't. Each case is listed under "Exposure nodes above their way's
+  rating" for you to settle.
+- **A re-export** (same segments, ratings, timestamps, and vertices; only the
+  uuids differ, as with "Red Trail" and "Red Trail Sync #2") gets a warning.
+  Both files are processed and the results coincide, so drop one and rerun
+  for a tidier report.
 
-If the batch holds the same survey twice (ITRS can export one track under
-two names and uuids; "Red Trail" and "Red Trail Sync #2" were identical),
-the report warns that the second is a re-export. Both are processed and the
-results coincide, so drop one of the files and rerun if you'd rather have a
-tidy report.
+Updating ratings already in OSM is the same run against current OSM data.
+Where the new rating differs from what a way or node carries, the tool
+checks the survey time against the element's last OSM edit. A survey newer
+than the edit replaces the value, since whatever put that value there came
+from an older survey. An element edited after the survey is refused with
+exit status 2, since it can't tell a re-survey from a mistake. If the
+refusals in the report are the update you expect, rerun with `--force`.
+Either way the tool cuts at the new boundaries, tags the pieces, and
+records every overwritten value under "Existing ITRS values overwritten".
 
-Updating ratings that are already in OSM is the same run, against the
-current OSM data: give the tool the new export (alone, or with the rest of
-the batch). Where the new rating differs from what a way or node already
-carries, the tool refuses and exits with status 2. That's deliberate, as it
-can't tell a re-survey from a mistake: OSM carries no survey date for these
-keys. Read the refusals in the report, and if they're the update you expect,
-rerun with `--force`. The tool then cuts the way at the new boundaries,
-tags the pieces, and records every overwritten value under "Existing ITRS
-values overwritten".
+Cuts from the earlier survey stay, so after an update two adjacent pieces can
+carry identical tags. The tool never combines ways (it can't tell its own old
+cut from one somebody else needed, and combining deletes a way). The report
+lists those pairs under "Pieces that could be combined"; if nothing else needs
+the cut, select both in JOSM and use Tools -> Combine Way before uploading.
 
-The cuts from the earlier survey stay where they are, so after an update
-two adjacent pieces can end up with identical tags. The tool doesn't
-combine ways (it can't tell a cut it made last time from one somebody else
-needed, and combining deletes a way), but the report lists those pairs
-under "Pieces that could be combined". If nothing else needs the cut,
-select both ways in JOSM and use Tools -> Combine Way before uploading.
+Left alone on an update: a stretch the new survey rates 0 (not assessed) or
+marks as paved keeps its tags, since 0 means "not rated" rather than "no
+rating", and shows under "Not applied"; and nodes from an earlier run whose
+points the new survey no longer exports, which you'll need to clear by hand.
 
-Two things the tool leaves alone on an update: a stretch the new survey
-rates 0 (not assessed) or marks as paved keeps whatever tags it had, since
-0 means "not rated" rather than "no rating", and the report shows it under
-"Not applied"; and nodes from an earlier run whose points the new survey
-no longer exports, which you'll want to find and clear by hand.
+## OSM policies
+
+OSM's [Automated edits](https://wiki.openstreetmap.org/wiki/Automated_edits)
+page and the [Automated Edits code of
+conduct](https://wiki.openstreetmap.org/wiki/Automated_Edits_code_of_conduct)
+cover changes made "without review individually". This tool is built to
+stay on the right side of that line: it uploads nothing, and the review
+steps above have you look at each split and each node in JOSM before you
+upload. That holds only if you do the review. A batch of forty trails can
+produce a hundred new ways, and if you'd rather skim than check each one,
+treat the run as a mechanical edit and follow the code of conduct
+(a documentation page under "Automated edits/username", discussion first,
+and `mechanical=yes` on the changeset). When a run changes or creates more
+than 100 OSM elements, the tool says so, on the terminal and at the top of
+the report, and suggests smaller batches: one trail system or one survey
+session per run keeps the review manageable.
+
+The parts of the code of conduct that apply either way are already in the
+workflow: edits are based on current OSM data (`--refresh` when in doubt),
+one changeset covers one area, the changeset comment is plain language, and
+the source tag names the ITRS version, the survey dates, and the tool
+version, so the edits are identifiable and revertable.
+
+ITRS ratings are a third party's survey data, so bringing them into OSM is
+also an import in the wiki's sense. Before the first upload in an area,
+check the [Import
+guidelines](https://wiki.openstreetmap.org/wiki/Import/Guidelines): that
+the rater and ITRS agree to the data going into OSM under the ODbL, and
+that the local community has been told.
 
 ## What it won't do
 
-It won't upload anything, by design: these edits are small, infrequent, and
-nearly always worth a human look, which is also what the OSM Automated Edits
-code of conduct asks for. It doesn't edit access or oneway tags either; where
-the survey disagrees with OSM about direction or who may use the trail, the
-report says so under "Advisories" and leaves the decision to you.
+It won't upload anything, by design. It doesn't edit access or oneway tags
+either; where the survey disagrees with OSM about direction or who may use
+the trail, the report says so under "Advisories" and leaves the decision to
+you.
 
 ## Development
 
@@ -203,9 +272,10 @@ python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
 
 The tests run offline on synthesized trails and OSM networks
 (`tests/fixtures/builder.py` has twelve scenarios with ground truth, each
-modeled on a real case). Real ITRS exports are private and never committed.
-If some are present in `research/exports/`, `tests/test_private_samples.py`
-runs on them too. `research/README.md` describes that directory.
+modeled on a real case, and `tests/test_resurvey.py` adds overlapping dated
+tracks). Real ITRS exports are private and never committed. If some are
+present in `research/exports/`, `tests/test_private_samples.py` runs on them
+too. `research/README.md` describes that directory.
 
 ## Thanks
 

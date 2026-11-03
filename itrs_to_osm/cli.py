@@ -19,7 +19,7 @@ from .match import MatchOptions, match_track
 from .osm import Bounds, OsmData, read_osm_file, read_osm_xml, write_josm_file
 from .overpass import DEFAULT_ENDPOINT, OverpassError, fetch_area
 from .points import PointOptions, apply_points
-from .report import RunContext, write_markdown
+from .report import RunContext, large_edit_warning, write_markdown
 from .split import CutOptions, apply_matches
 
 EXIT_OK = 0
@@ -208,6 +208,9 @@ def run(args: argparse.Namespace) -> int:
         write_html(ctx, base.with_name(base.name + ".report.html"))
 
     print(summary_line(ctx, report_path))
+    large = large_edit_warning(ctx)
+    if large:
+        print(f"warning: {large}", file=sys.stderr)
     refused = len(result.refusals) + len(points.refusals)
     if refused and not args.force:
         print(

@@ -2,8 +2,9 @@
 
 Per OSM way, the intervals from every matched segment (of every track in
 the batch) become claims in way chainage. Claims resolve into zones (same
-tags merge; where ratings differ, the newer survey wins, and the longer claim
-wins between surveys of the same date), zone edges become cuts, cuts
+tags merge; where ratings differ, the newer survey wins by its mutation
+time, and the longer claim wins between claims with the same time), zone
+edges become cuts, cuts
 become nodes (an existing junction node if one is close, else any existing
 node if closer still, else a new node on the way's own geometry), the way
 is split JOSM-style (the piece with the most nodes keeps the id), the
@@ -48,7 +49,7 @@ class Claim:
     start_m: float
     end_m: float
     sources: list[str] = field(default_factory=list)  # "Track / S003" labels
-    surveyed: str = ""  # YYYY-MM-DD from segment_last_mutated_on_utc; "" when unknown
+    surveyed: str = ""  # segment_last_mutated_on_utc (ISO, sortable); "" when unknown
 
     @property
     def length(self) -> float:
@@ -160,6 +161,7 @@ class WayChange:
     relations: list[RelationChange] = field(default_factory=list)
     refusals: list[Refusal] = field(default_factory=list)
     overlaps: list[Overlap] = field(default_factory=list)
+    claims: list[Claim] = field(default_factory=list)  # every track's claims on the way
     notes: list[str] = field(default_factory=list)
     modified: bool = False
 
@@ -212,6 +214,24 @@ def _label(track_name: str, segment: Segment) -> str:
     return f"{track_name} / {segment.name}"
 
 
+def survey_day(surveyed: str) -> str:
+    """The date part of a survey timestamp, for the report."""
+    return surveyed[:10]
+
+
+def survey_newer_than_edit(surveyed: str, edited: str | None) -> bool:
+    """True when a survey postdates the OSM element's last edit.
+
+    A value already in OSM came from some earlier survey, and that survey
+    can't be younger than the upload that carried it. So when the export's
+    survey time is later than the element's last-edit time, the export is
+    the newer survey and may replace the value. When the element was edited
+    after the survey, nothing says which is newer, and the caller refuses.
+    Both are ISO 8601 UTC strings, so they compare as text.
+    """
+    return bool(surveyed) and bool(edited) and surveyed > edited
+
+
 def sources_text(sources: list[str]) -> str:
     """``Track / S002, S004, S005; Other / S001`` for a list of segment labels.
 
@@ -257,7 +277,7 @@ def _collect_claims(data: OsmData, matches: list[TrackMatch]) -> dict[int, list[
                         start,
                         end,
                         [_label(tm.track.name, sm.segment)],
-                        surveyed=sm.segment.last_mutated[:10],
+                        surveyed=sm.segment.last_mutated,
                     )
                 )
     return {way_id: _merge_same_track(c) for way_id, c in claims.items()}
@@ -290,11 +310,13 @@ def _resolve_zones(
     """Newer surveys win overlaps, then longer claims; equal tags merge.
 
     A rater who re-surveys a corner exports a short track that overlaps the
-    original, so the survey date decides first (an ITRS "update" is usually
-    the shorter track). Between claims surveyed the same day, or with no
-    date, the longer claim wins: a track rating a whole way at one level
-    beats another track's short tail onto it. Every overlap with different
-    ratings goes to ``overlaps`` for the report.
+    original, so the survey time decides first (an ITRS "update" is usually
+    the shorter track). ``segment_last_mutated_on_utc`` is a full timestamp,
+    so two surveys on one day still order; a re-export of one survey carries
+    the identical time. Between claims with the same time, or with none, the
+    longer claim wins: a track rating a whole way at one level beats another
+    track's short tail onto it. Every overlap with different ratings goes to
+    ``overlaps`` for the report.
 
     A leftover of a trimmed claim shorter than the minimum piece is dropped
     (with a note) rather than becoming a sliver. A short claim that was not
@@ -333,7 +355,7 @@ def _resolve_zones(
                 notes.append(
                     f"{claim.label} overlaps {sources_text(z.sources)} between "
                     f"{max(a, z.start_m):.0f} and {min(b, z.end_m):.0f} m with different "
-                    f"ratings; the newer survey ({z.surveyed}) wins"
+                    f"ratings; the newer survey ({survey_day(z.surveyed)}) wins"
                     if newer
                     else f"{claim.label} overlaps {sources_text(z.sources)} between "
                     f"{max(a, z.start_m):.0f} and {min(b, z.end_m):.0f} m with different "
@@ -570,6 +592,11 @@ def _zone_for(zones: list[Zone], start_m: float, end_m: float) -> Zone | None:
     return None
 
 
+def _effective_itrs(base: dict[str, str], zone: Zone | None) -> dict[str, str]:
+    """The ITRS tags a piece ends up with: what the way had, plus its zone."""
+    return {**base, **zone.tags} if zone else dict(base)
+
+
 def _plan_ranges(
     data: OsmData, way: Way, cuts: list[Cut], zones: list[Zone]
 ) -> list[tuple[int, int, Zone | None]]:
@@ -601,6 +628,7 @@ def apply_matches(
             length_m=length_m,
         )
         result.ways.append(change)
+        change.claims = list(all_claims[way_id])
 
         zones = _resolve_zones(
             all_claims[way_id], change.notes, options.min_piece_m, change.overlaps
@@ -610,11 +638,21 @@ def apply_matches(
         if not zones:
             continue
 
-        # Refuse when an existing ITRS value would change, unless forced.
+        # An existing ITRS value that would change: allowed when the survey
+        # is newer than the way's last edit in OSM (noted), else refused
+        # unless forced.
         existing = existing_itrs(way.tags)
         for z in zones:
             for k, v in z.tags.items():
-                if k in existing and existing[k] != v:
+                if k not in existing or existing[k] == v:
+                    continue
+                if survey_newer_than_edit(z.surveyed, way.timestamp):
+                    change.notes.append(
+                        f"{k}={existing[k]} replaced by {v} from {sources_text(z.sources)}: "
+                        f"the survey ({survey_day(z.surveyed)}) is newer than the way's last "
+                        f"OSM edit ({survey_day(way.timestamp or '')})"
+                    )
+                else:
                     change.refusals.append(Refusal(way.id, k, existing[k], v, list(z.sources)))
         if change.refusals and not options.force:
             continue
@@ -638,13 +676,15 @@ def apply_matches(
             change.cuts.append(cut)
         change.cuts.sort(key=lambda c: c.index)
 
-        # A cut between two pieces that would end up with the same tags is
-        # pointless (a snapped cut can do that); remove it, and any node it
-        # inserted, before splitting.
+        # A cut between two pieces that would end up with the same ITRS tags
+        # is pointless (a snapped cut can do that, and so can a gap in the
+        # track on a way that already carries the rating); remove it, and any
+        # node it inserted, before splitting.
+        base_itrs = existing_itrs(way.tags)
         ranges_planned = _plan_ranges(data, way, change.cuts, zones)
         for i in range(len(ranges_planned) - 1, 0, -1):
             za, zb = ranges_planned[i - 1][2], ranges_planned[i][2]
-            if (za.tags if za else None) == (zb.tags if zb else None):
+            if _effective_itrs(base_itrs, za) == _effective_itrs(base_itrs, zb):
                 cut = change.cuts.pop(i - 1)
                 if cut.kind == "inserted":
                     nodes = list(way.nodes)

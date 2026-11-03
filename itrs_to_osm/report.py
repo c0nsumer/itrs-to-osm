@@ -18,7 +18,7 @@ from .itrs import DIRECTION_ONE_WAY, DIRECTION_TWO_WAY, USE_BIKE_ONLY, USE_SHARE
 from .match import Interval, MatchOptions, SegmentMatch, TrackMatch
 from .osm import OsmData, Way
 from .points import EXPOSURE_TYPE, PointChange, PointOptions, PointsResult
-from .split import ApplyResult, CutOptions, WayChange, sources_text
+from .split import ApplyResult, CutOptions, WayChange, sources_text, survey_day
 from .tagging import (
     EXPOSURE_KEY,
     ITRS_KEY_PREFIX,
@@ -63,6 +63,40 @@ def changeset_suggestion(ctx: RunContext) -> tuple[str, str]:
 
 
 CHANGESET_COMMENT_MAX = 255  # OSM's limit on a changeset comment
+
+# Above this many changed or created OSM elements, the run is big enough
+# that a reviewer may skim rather than check each one, which is where the
+# Automated Edits code of conduct starts to apply.
+LARGE_EDIT_ELEMENTS = 100
+CODE_OF_CONDUCT_URL = "https://wiki.openstreetmap.org/wiki/Automated_Edits_code_of_conduct"
+
+
+def edit_size(ctx: RunContext) -> int:
+    """OSM elements this run modifies or creates."""
+    r, pts = ctx.result, ctx.points
+    return (
+        len(r.modified_ways)
+        + r.ways_added
+        + r.nodes_added
+        + r.relations_modified
+        + pts.nodes_added
+        + len(pts.written)
+    )
+
+
+def large_edit_warning(ctx: RunContext) -> str | None:
+    """A warning when the run is large enough to need care, else None."""
+    n = edit_size(ctx)
+    if n <= LARGE_EDIT_ELEMENTS:
+        return None
+    return (
+        f"Large edit: this run changes or creates {n} OSM elements from {len(ctx.tracks)} "
+        "track(s). Review every split and node in JOSM before uploading. If you won't review "
+        f"each one, the OSM Automated Edits code of conduct applies ({CODE_OF_CONDUCT_URL}): "
+        "document the edit on the wiki, discuss it first, and tag the changeset "
+        "mechanical=yes. Smaller batches (one trail system or one session per run) keep the "
+        "review manageable."
+    )
 
 
 def _trail_list(ctx: RunContext) -> str:
@@ -254,14 +288,18 @@ def node_ref(node_id: int) -> str:
 
 def point_status_text(change: PointChange) -> str:
     """What happened to an Exposure point, in a few words."""
+    extra = f" ({change.reason})" if change.reason else ""
     if change.status == "tagged":
         return "tagged"
     if change.status == "already":
-        return "already tagged"
+        return f"already tagged{extra}"
     if change.status == "overwritten":
-        return f"overwritten (was {change.old})"
+        return f"overwritten (was {change.old}){extra}"
     if change.status == "refused":
-        return f"refused (node has {change.old})"
+        text = f"refused (node has {change.old})"
+        if change.reason.startswith("found by location"):
+            text += f"; {change.reason}"
+        return text
     if change.status == "unplaced":
         return f"not placed: {change.reason}"
     if change.reason.startswith("stale:"):
@@ -361,6 +399,9 @@ def _header(ctx: RunContext) -> list[Block]:
         )
     blocks: list[Block] = [Heading(1, "itrs-to-osm report"), ItemList(items)]
     warnings: list[str] = []
+    large = large_edit_warning(ctx)
+    if large:
+        warnings.append(large)
     for w in [*ctx.warnings, *(f"{t.name}: {w}" for t in ctx.tracks for w in t.warnings)]:
         if w not in warnings:
             warnings.append(w)
@@ -1028,14 +1069,15 @@ def _overlapping_surveys(ctx: RunContext) -> list[Inline]:
         if o.rule == "newer":
             rule = "the newer survey wins"
         elif o.winner_surveyed or o.loser_surveyed:
-            rule = "same survey date, so the longer claim wins"
+            rule = "same survey time, so the longer claim wins"
         else:
             rule = "no survey dates, so the longer claim wins"
         out.append(
             f"{way_ref(w.way_id)} ({w.name or 'unnamed'}), {o.start_m:.0f} to {o.end_m:.0f} m "
             f"({o.length:.0f} m): {sources_text(o.winner)} ({_short_tags(o.winner_tags)}, "
-            f"surveyed {o.winner_surveyed or 'unknown'}) over {sources_text(o.loser)} "
-            f"({_short_tags(o.loser_tags)}, surveyed {o.loser_surveyed or 'unknown'}); {rule}"
+            f"surveyed {survey_day(o.winner_surveyed) or 'unknown'}) over "
+            f"{sources_text(o.loser)} ({_short_tags(o.loser_tags)}, surveyed "
+            f"{survey_day(o.loser_surveyed) or 'unknown'}); {rule}"
         )
     return out
 
@@ -1095,6 +1137,36 @@ def _combinable(ctx: RunContext) -> list[Inline]:
     return out
 
 
+def _nodes_above_way(ctx: RunContext) -> list[Inline]:
+    """Written exposure nodes rated worse than the piece they sit on.
+
+    ITRS rates a way as its worst section, so a node should never exceed its
+    way. It can happen when the point's own segment didn't land there (a
+    sliver dropped after an overlap, a gap closed from a neighbor), and the
+    reviewer should decide which of the two to trust.
+    """
+    out: list[Inline] = []
+    for c in ctx.points.written:
+        if c.way_id is None or c.value is None:
+            continue
+        way = ctx.data.ways.get(c.way_id)
+        if way is None:
+            continue
+        raw = way.tags.get(EXPOSURE_KEY)
+        try:
+            way_value = int(raw) if raw is not None else None
+        except ValueError:
+            way_value = None
+        if way_value is not None and way_value >= c.value:
+            continue
+        has = f"exposure {way_value}" if way_value is not None else "no exposure tag"
+        out.append(
+            f"n{c.node_id} is rated {c.value} ({c.track_name} / {c.segment_name}) but sits on "
+            f"{piece_title(ctx, c.way_id)}, which has {has}; check which one to trust"
+        )
+    return out
+
+
 def _advisories(ctx: RunContext) -> list[Block]:
     blocks: list[Block] = [
         Heading(2, "Advisories"),
@@ -1104,6 +1176,7 @@ def _advisories(ctx: RunContext) -> list[Block]:
         ("Overlapping surveys", _overlapping_surveys(ctx)),
         ("Existing ITRS values overwritten", _overwritten(ctx)),
         ("Pieces that could be combined", _combinable(ctx)),
+        ("Exposure nodes above their way's rating", _nodes_above_way(ctx)),
         ("Direction", _direction_mismatches(ctx)),
         ("Use and access", _use_mismatches(ctx)),
     ):

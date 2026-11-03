@@ -38,7 +38,11 @@ M_PER_DEG_LAT = EARTH_RADIUS_M * math.pi / 180.0
 TECH = "mtb:scale:itrs:technical_difficulty"
 EXPOSURE = "mtb:scale:itrs:exposure"
 
-META_TIMESTAMP = "2026-01-01T00:00:00Z"
+# Later than every survey date the fixtures use, so an existing ITRS value
+# in a fixture reads as edited after the survey and is refused, as before
+# the survey-newer-than-edit rule. Tests that want the overwrite set an
+# earlier timestamp on the element themselves.
+META_TIMESTAMP = "2026-12-01T00:00:00Z"
 COORD_DECIMALS = 7
 
 Point = tuple[float, float]

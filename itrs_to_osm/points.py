@@ -10,21 +10,40 @@ segment, and the decode already put that vertex on a way at a chainage
 (``SegmentMatch.vertex_places``). After the ways are split, the node goes
 on the piece holding that chainage: an existing node within ``snap_m``
 unless it's a junction or carries other tags, else a new node inserted on
-the way's own geometry. A point whose stretch of way a newer survey rated
-(``Piece.surveyed``) is stale and gets no node: the newer survey exported
-its own points. Runs after ``split.apply_matches``; nothing here talks to
-OSM.
+the way's own geometry. A point on a spot that another track from a newer
+survey also claims is stale and gets no node: the newer survey exported its
+own points there, and it may well have re-rated this one.
+
+Reruns matter: once the ways are split at the segment boundaries, a short
+segment can match as a dropped tail every time. So a point whose vertex sits
+on a tail dropped for length still gets its node there, as long as the tail
+is the same trail (a way named like one the track kept) rather than a
+junction overshoot onto a neighbor. And a point the match can't place at all
+is looked up by location: an existing exposure node within ``snap_m`` of the
+surveyed spot counts as the point's node (already tagged, or refused when
+the value differs). Runs after ``split.apply_matches``; nothing here talks
+to OSM.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .geo import LocalProjection, project_point
-from .itrs import NOT_RATED, RatingPoint, Segment, Track, distance_m
+from .geo import LocalProjection, normalize_name, project_point
+from .itrs import NOT_RATED, RatingPoint, Segment, distance_m
 from .match import SegmentMatch, TrackMatch
 from .osm import Node, OsmData, Way
-from .split import ApplyResult, Piece, _chainage, _is_junction, insert_node_at, sources_text
+from .split import (
+    ApplyResult,
+    Piece,
+    WayChange,
+    _chainage,
+    _is_junction,
+    insert_node_at,
+    sources_text,
+    survey_day,
+    survey_newer_than_edit,
+)
 from .tagging import EXPOSURE_KEY, EXPOSURE_VALUES
 
 EXPOSURE_TYPE = "Exposure"
@@ -59,7 +78,7 @@ class PointChange:
     from_point_m: float = 0.0  # straight line from the surveyed coordinate to the node
     offset_m: float = 0.0  # the point's distance from the way, per the match
     old: str | None = None  # the existing value when refused or overwritten
-    surveyed: str = ""  # YYYY-MM-DD of the segment's survey, "" when unknown
+    surveyed: str = ""  # the segment's survey timestamp, "" when unknown
 
     @property
     def written(self) -> bool:
@@ -103,10 +122,22 @@ def _segment_match(tm: TrackMatch, point: RatingPoint) -> tuple[Segment, Segment
     return None
 
 
+def _kept_names(tm: TrackMatch, data: OsmData) -> set[str]:
+    """Normalized names of every way the track's segments kept a stretch of."""
+    names: set[str] = set()
+    for sm in tm.segments:
+        for iv in sm.intervals:
+            way = data.ways.get(iv.way_id)
+            if way is not None and way.tags.get("name"):
+                names.add(normalize_name(way.tags["name"]))
+    return names
+
+
 def _locate(
-    track: Track, sm: SegmentMatch, point: RatingPoint, data: OsmData, options: PointOptions
+    tm: TrackMatch, sm: SegmentMatch, point: RatingPoint, data: OsmData, options: PointOptions
 ) -> tuple[int, float, float] | str:
     """(way id, chainage m, offset m) for the point, or the reason it has none."""
+    track = tm.track
     seg = sm.segment
     lonlat = (point.lon, point.lat)
     k, d = min(((i, distance_m(lonlat, c)) for i, c in enumerate(seg.coords)), key=lambda x: x[1])
@@ -120,8 +151,22 @@ def _locate(
         for iv in sm.intervals:
             if iv.way_id == place.way_id and iv.start - tol <= place.along_m <= iv.end + tol:
                 return place.way_id, min(max(place.along_m, iv.start), iv.end), place.offset_m
-        if any(iv.way_id == place.way_id for iv in sm.dropped):
-            return f"it sits on the dropped tail onto way {place.way_id}"
+        tail = next((iv for iv in sm.dropped if iv.way_id == place.way_id), None)
+        if tail is not None:
+            # A tail dropped for length onto the same trail (a rerun over
+            # ways already split at the segment boundaries) is still the
+            # right spot for a node. A tail onto a differently named way is
+            # a junction overshoot, and the node would land on the neighbor.
+            way = data.ways.get(place.way_id)
+            name = normalize_name(way.tags.get("name", "")) if way else ""
+            if tail.p90_offset > options.max_offset_m or place.offset_m > options.max_offset_m:
+                return (
+                    f"it sits on the dropped tail onto way {place.way_id}, "
+                    f"{tail.p90_offset:.0f} m off it"
+                )
+            if name and name in _kept_names(tm, data):
+                return place.way_id, place.along_m, place.offset_m
+            return f"it sits on the dropped tail onto way {place.way_id}, a different trail"
         return f"its track vertex landed outside the segment's stretch of way {place.way_id}"
 
     # Not on a vertex: project onto the segment's kept stretches instead.
@@ -144,11 +189,25 @@ def _locate(
     return best[1], best[2], best[0]
 
 
-def _piece_for(result: ApplyResult, way_id: int, along_m: float) -> tuple[int, float, Piece | None]:
-    """(piece way id, chainage on that piece, the piece) after the splits."""
+def _newer_claim(change: WayChange | None, track_name: str, along_m: float, surveyed: str):
+    """Another track's claim from a newer survey covering ``along_m``, if any."""
+    if change is None:
+        return None
+    newer = [
+        c
+        for c in change.claims
+        if c.track_name != track_name
+        and c.surveyed > surveyed
+        and c.start_m - INTERVAL_TOL_M <= along_m <= c.end_m + INTERVAL_TOL_M
+    ]
+    return max(newer, key=lambda c: c.surveyed) if newer else None
+
+
+def _piece_for(result: ApplyResult, way_id: int, along_m: float) -> tuple[int, float]:
+    """(piece way id, chainage on that piece) after the splits."""
     change = next((w for w in result.ways if w.way_id == way_id), None)
     if change is None or not change.pieces:
-        return way_id, along_m, None
+        return way_id, along_m
     best: Piece | None = None
     best_d = float("inf")
     for p in change.pieces:
@@ -159,7 +218,7 @@ def _piece_for(result: ApplyResult, way_id: int, along_m: float) -> tuple[int, f
         if d < best_d:
             best, best_d = p, d
     assert best is not None
-    return best.way_id, min(max(along_m - best.start_m, 0.0), best.length), best
+    return best.way_id, min(max(along_m - best.start_m, 0.0), best.length)
 
 
 def _usable(data: OsmData, node: Node) -> bool:
@@ -167,6 +226,20 @@ def _usable(data: OsmData, node: Node) -> bool:
     if _is_junction(data, node.id):
         return False
     return all(k == EXPOSURE_KEY for k in node.tags)
+
+
+def _nearby_exposure_node(
+    data: OsmData, point: RatingPoint, options: PointOptions
+) -> tuple[Node, float] | None:
+    """An existing exposure node within ``snap_m`` of the surveyed point."""
+    best: tuple[Node, float] | None = None
+    for node in data.nodes.values():
+        if EXPOSURE_KEY not in node.tags:
+            continue
+        d = distance_m((point.lon, point.lat), (node.lon, node.lat))
+        if d <= options.snap_m and (best is None or d < best[1]):
+            best = (node, d)
+    return best
 
 
 def _choose_node(
@@ -238,13 +311,36 @@ def apply_points(
                 change.reason = f"references unknown segment {point.segment_uuid or seg_name}"
                 continue
             seg, sm = found
-            change.surveyed = seg.last_mutated[:10]
-            if sm.status == "unmatched" or not sm.intervals:
-                change.status, change.reason = "unplaced", f"{seg.name} is unmatched"
-                continue
-            located = _locate(track, sm, point, data, options)
+            change.surveyed = seg.last_mutated
+            located: tuple[int, float, float] | str
+            if sm.status == "unmatched":
+                located = f"{seg.name} is unmatched"
+            elif not sm.intervals and not sm.dropped:
+                located = f"{seg.name} kept no stretch of any way"
+            else:
+                located = _locate(tm, sm, point, data, options)
             if isinstance(located, str):
-                change.status, change.reason = "unplaced", located
+                nearby = _nearby_exposure_node(data, point, options)
+                if nearby is None:
+                    change.status, change.reason = "unplaced", located
+                    continue
+                node, d = nearby
+                parents = [w for w in data.parent_ways(node.id) if w.tags.get("highway")]
+                change.node_id, change.kind = node.id, "node"
+                change.way_id = parents[0].id if parents else None
+                change.from_point_m = d
+                existing = node.tags[EXPOSURE_KEY]
+                where = f"found by location, {d:.1f} m from the surveyed point ({located})"
+                if existing == str(value):
+                    change.status, change.reason = "already", where
+                elif options.force:
+                    change.status, change.old = "overwritten", existing
+                    change.reason = where
+                    node.tags[EXPOSURE_KEY] = str(value)
+                    data.mark_modified(node)
+                else:
+                    change.status, change.old = "refused", existing
+                    change.reason = where
                 continue
             way_id, along_m, change.offset_m = located
             if any(w.way_id == way_id and w.status == "refused" for w in result.ways):
@@ -254,16 +350,19 @@ def apply_points(
                     "resolve that first, or rerun with --force"
                 )
                 continue
-            piece_id, local_m, piece = _piece_for(result, way_id, along_m)
+            way_change = next((w for w in result.ways if w.way_id == way_id), None)
+            newer = _newer_claim(way_change, track.name, along_m, change.surveyed)
+            if newer is not None:
+                change.reason = (
+                    f"stale: a newer survey ({survey_day(newer.surveyed)}, "
+                    f"{sources_text(newer.sources)}) covers this spot on way {way_id}; "
+                    "its own points apply"
+                )
+                continue
+            piece_id, local_m = _piece_for(result, way_id, along_m)
             way = data.ways.get(piece_id)
             if way is None:
                 change.status, change.reason = "unplaced", f"way {piece_id} is not in the data"
-                continue
-            if piece is not None and piece.surveyed > change.surveyed:
-                change.reason = (
-                    f"stale: a newer survey ({piece.surveyed}, {sources_text(piece.sources)}) "
-                    f"rated this stretch of way {piece_id}; its own points apply"
-                )
                 continue
 
             node, change.kind, change.moved_m = _choose_node(data, way, local_m, options)
@@ -288,7 +387,7 @@ def apply_points(
                     elif older:
                         change.reason = (
                             f"shares node {node.id} with a point rated {current} from a newer "
-                            f"survey ({earlier.surveyed}); that one stays"
+                            f"survey ({survey_day(earlier.surveyed)}); that one stays"
                         )
                     else:
                         change.reason = (
@@ -298,19 +397,28 @@ def apply_points(
                     continue
             if orig == new:
                 change.status, change.reason = "already", "node already carries this value"
-            elif orig is not None and not options.force:
+            elif (
+                orig is not None
+                and not options.force
+                and not survey_newer_than_edit(change.surveyed, node.timestamp)
+            ):
                 change.status, change.old = "refused", orig
                 change.reason = f"node has {EXPOSURE_KEY}={orig}, survey says {new}"
             else:
                 change.status = "overwritten" if orig is not None else "tagged"
                 change.old = orig
+                if orig is not None and not options.force:
+                    change.reason = (
+                        f"the survey ({survey_day(change.surveyed)}) is newer than the node's "
+                        f"last OSM edit ({survey_day(node.timestamp or '')})"
+                    )
                 node.tags[EXPOSURE_KEY] = new
                 data.mark_modified(node)
                 if earlier is not None and earlier.status in ("tagged", "overwritten", "already"):
                     earlier.status = "skipped"
                     earlier.reason = (
                         f"shares node {node.id} with a point rated {new} from a newer survey "
-                        f"({change.surveyed}); that one stays"
+                        f"({survey_day(change.surveyed)}); that one stays"
                         if change.surveyed > earlier.surveyed
                         else f"shares node {node.id} with a point rated {new}; "
                         "the higher rating stays"

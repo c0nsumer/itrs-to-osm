@@ -647,4 +647,44 @@ building against the real tracks:
   headers, and zebra rows. The constant "date" in the export (2026-02-04 in
   every file, whatever the survey date) is reported once as the export
   format date, not as an export date.
+- 2026-Nov-03, later still: Steve asked what happens when a newer survey
+  downrates an exposure point. Two gaps. Precedence compared dates, so a
+  same-day re-survey tied and "the higher rating stays" would have kept the
+  old, wrong value; it now compares the full `segment_last_mutated_on_utc`
+  timestamp (a true re-export carries the identical microsecond, every
+  update is hours or days later). And the stale check used the merged
+  piece's newest date, so an older track's point on a stretch the newer
+  track never reached could be dropped; it now asks whether another track
+  from a newer survey claims that spot (`WayChange.claims`).
+- 2026-Nov-03, gap check: all 40 Copper Harbor exports (the six from
+  October plus the new batch minus the Red Trail re-export) rerun against
+  fresh production data. Zero refusals and zero overwrites, so the uploads
+  carry what the current rules produce. Found and fixed: a rerun over a way
+  that already carries the rating would split it where the track has a gap,
+  because the pointless-cut check compared zone tags (None vs a rating)
+  rather than the tags each piece ends up with (Dancing Bear w1575021101
+  would have become three identical pieces). Left over for upload: two
+  exposure nodes, one of them the Garden Brook Part 1 / S009 point that the
+  "above its way's rating" advisory flags.
+- 2026-Nov-03, reruns: the gap check left three points "not placed: it sits
+  on the dropped tail", all of which production already had nodes for
+  (3-4 m away). Once ways are split at the segment boundaries, a short
+  segment matches as a tail every rerun. Now a point on a tail dropped for
+  length gets its node when the tail's way is named like one the track kept
+  (one trail cut in two), stays unplaced on a differently named way (a
+  junction overshoot, eg: Loam Rider onto Flo'Rion), and any point the
+  match can't place is looked up by location against existing exposure
+  nodes within the snap distance (already / refused / --force overwrite).
+- 2026-Nov-03, evening: Steve asked whether a survey newer than the OSM
+  element's last edit should just apply. It should, and only in that
+  direction: a value in OSM came from a survey older than the upload that
+  carried it, so a survey time later than the element's last-edit time
+  proves the export is newer. An element edited after the survey proves
+  nothing (geometry fix, someone else's retag), so that stays a refusal
+  unless `--force`. Implemented for ways and exposure nodes; the fixture
+  element timestamp moved to 2026-12-01 so the refusal tests still refuse.
+  Also added: a "Large edit" warning above 100 changed or created elements
+  that points at the Automated Edits code of conduct, and an "OSM policies"
+  section in the README linking the code of conduct, Automated edits, and
+  the Import guidelines.
 
