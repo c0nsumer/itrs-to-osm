@@ -280,9 +280,11 @@ too. `research/README.md` describes that directory.
 ## Thanks
 
 Mischa Crumbach and ITRS (https://itrs.bike/) for the rating system, the
-sample exports, and the data documentation. The OSM wiki pages on the JOSM
-file format and the Overpass API, and JOSM's own `SplitWayCommand`, for the
-rules this tool copies.
+sample exports, and the data documentation. Nick Ryan of the [Copper Harbor
+Trails Club](https://www.copperharbortrails.org/) for the ITRS GeoJSON
+exports from Copper Harbor that were used to test and validate this tool.
+The OSM wiki pages on the JOSM file format and the Overpass API, and JOSM's
+own `SplitWayCommand`, for the rules this tool copies.
 
 This tool was developed with Claude Code (AI-assisted); the design, review,
 and decisions are mine.
