@@ -167,7 +167,7 @@ and reports without writing a `.osm`.
 
 ## Re-surveys and updates
 
-ITRS can't edit a segment in place. A re-rated corner arrives as a short new
+The ITRS survey app currently (as of 2026-Nov) cannot can't edit a segment in place, therefore to define corrections a survey must be re-submitted. A re-rated corner becomes a short new
 export that overlaps the original ("Berry Picker" plus "Berry Picker (first
 corner update)"), long trails arrive in parts that overlap a few meters at the
 joins, and one survey can turn up twice under two names. The rules for all of
