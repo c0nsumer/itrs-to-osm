@@ -101,7 +101,8 @@ Suggested workflow begins with opening the `.osm` in JOSM:
    row per ITRS Exposure point: the OSM node that got the tag (existing or
    new), the way it sits on, and the distance from the surveyed point to
    that node. The node should sit on the trail at the exposed spot, not on
-   a junction.
+   a junction. Below the table, "Stale exposure nodes" lists each node that
+   lost its tag because the survey no longer has a point there.
 5. Paste the changeset comment and source from the end of the report into
    the upload dialog, and upload. Only the modified and new elements go up.
 
@@ -154,16 +155,29 @@ survey is newer than that edit, the value in OSM came from an older survey,
 and the tool replaces it and says so in the report. If the element was
 edited after the survey, there's no telling which is newer, so the tool
 refuses, says so in the report, and exits with status 2. `--force`
-overwrites those too and records the old value. The tool can't remove a
-node for a point ITRS no longer exports, so the report asks you to look for
-stale ones.
+overwrites those too and records the old value.
+
+**Stale exposure nodes.** A re-survey can drop a point, or move it. ITRS
+exports a point for every exposed section it rates, so an existing node with
+`mtb:scale:itrs:exposure` on a stretch this run surveyed, with no point in
+the run behind it, is stale. The tool removes the tag and leaves the node
+(it's part of the way's shape, and the tool can't tell who put it there).
+The date rule is the same as for a differing value: if the survey is newer
+than the node's last OSM edit, the tag goes; if the node was edited after
+the survey, the tool refuses and exits with status 2 unless `--force` is
+given. Only the surveyed stretch is checked. A node past the end of the
+survey, on a junction with another way, on a refused way, or on a segment
+with no exposure rating is left alone, and so is every node on a segment
+that has a point the tool couldn't place (it may be that node's point). A
+point below `--exposure-min` still counts as backing its node.
 
 **Flags.** `--corridor`, `--max-offset`, `--snap`, `--snap-junction`, and
 `--min-piece` set the thresholds above. `--name` or `--way-id` pin the match
 when the rater's and the mapper's names disagree. `--exposure-min` raises the
 rating a point needs for a node (the default, 2, is ITRS's own export
-threshold). `--no-exposure-nodes` turns the node step off. `--dry-run` matches
-and reports without writing a `.osm`.
+threshold). `--no-exposure-nodes` turns the node step off, stale node removal
+included. `--keep-stale-exposure-nodes` turns off only the removal. `--dry-run`
+matches and reports without writing a `.osm`.
 
 ## Re-surveys and updates
 
@@ -213,6 +227,8 @@ exit status 2, since it can't tell a re-survey from a mistake. If the
 refusals in the report are the update you expect, rerun with `--force`.
 Either way the tool cuts at the new boundaries, tags the pieces, and
 records every overwritten value under "Existing ITRS values overwritten".
+Exposure nodes the new survey has no point for lose their tag by the same
+date rule (see "Stale exposure nodes" above).
 
 Cuts from the earlier survey stay, so after an update two adjacent pieces can
 carry identical tags. The tool never combines ways (it can't tell its own old

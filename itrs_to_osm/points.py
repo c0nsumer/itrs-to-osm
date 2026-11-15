@@ -21,8 +21,18 @@ is the same trail (a way named like one the track kept) rather than a
 junction overshoot onto a neighbor. And a point the match can't place at all
 is looked up by location: an existing exposure node within ``snap_m`` of the
 surveyed spot counts as the point's node (already tagged, or refused when
-the value differs). Runs after ``split.apply_matches``; nothing here talks
-to OSM.
+the value differs).
+
+A re-survey can also drop a point. ITRS exports a point for every exposed
+section rated blue or worse, so a node carrying the tag on a stretch this run
+surveyed, with no point of this run behind it, is stale: the tag comes off
+(the node stays, it's part of the way's shape). Same date rule as a differing
+value: removed when the survey is newer than the node's last OSM edit, else
+refused unless forced. Nothing is removed where the segment's exposure isn't
+rated, where one of the segment's own points couldn't be placed, on a
+junction with a way outside the run, or outside the surveyed stretch.
+
+Runs after ``split.apply_matches``; nothing here talks to OSM.
 """
 
 from __future__ import annotations
@@ -35,10 +45,12 @@ from .match import SegmentMatch, TrackMatch
 from .osm import Node, OsmData, Way
 from .split import (
     ApplyResult,
+    Claim,
     Piece,
     WayChange,
     _chainage,
     _is_junction,
+    _label,
     insert_node_at,
     sources_text,
     survey_day,
@@ -59,6 +71,7 @@ class PointOptions:
     max_offset_m: float = 15.0
     force: bool = False
     enabled: bool = True
+    remove_stale: bool = True  # untag nodes the survey no longer has a point for
 
 
 @dataclass
@@ -79,6 +92,8 @@ class PointChange:
     offset_m: float = 0.0  # the point's distance from the way, per the match
     old: str | None = None  # the existing value when refused or overwritten
     surveyed: str = ""  # the segment's survey timestamp, "" when unknown
+    source: str = ""  # "Track / S003" label of the point's segment, "" when unknown
+    backs_node_id: int | None = None  # for a point not written: the node already marking it
 
     @property
     def written(self) -> bool:
@@ -86,13 +101,37 @@ class PointChange:
 
 
 @dataclass
+class StaleNode:
+    """An existing exposure node on a surveyed stretch with no point behind it."""
+
+    node_id: int
+    way_id: int  # the piece the node sits on, after splits
+    old: str  # the value the node carried
+    status: str  # removed | refused | kept
+    reason: str
+    sources: list[str]  # "Track / S003" labels of the survey covering the spot
+    surveyed: str
+    lat: float
+    lon: float
+
+
+@dataclass
 class PointsResult:
     changes: list[PointChange] = field(default_factory=list)
     nodes_added: int = 0
+    stale: list[StaleNode] = field(default_factory=list)
 
     @property
     def refusals(self) -> list[PointChange]:
         return [c for c in self.changes if c.status == "refused"]
+
+    @property
+    def removed(self) -> list[StaleNode]:
+        return [s for s in self.stale if s.status == "removed"]
+
+    @property
+    def stale_refusals(self) -> list[StaleNode]:
+        return [s for s in self.stale if s.status == "refused"]
 
     @property
     def written(self) -> list[PointChange]:
@@ -272,6 +311,113 @@ def _choose_node(
     return node, "inserted", abs(target - along_m)
 
 
+def _existing_node_for(
+    tm: TrackMatch, point: RatingPoint, data: OsmData, result: ApplyResult, options: PointOptions
+) -> int | None:
+    """The exposure node already marking a point this run won't write.
+
+    A point skipped for its rating (below ``--exposure-min``, not rated)
+    still says the spot is exposed, so its node isn't stale. Same placement
+    as a written point, minus the writing: the tagged node within ``snap_m``
+    of the matched position, else one within ``snap_m`` of the surveyed spot.
+    """
+    found = _segment_match(tm, point)
+    if found is not None:
+        sm = found[1]
+        if sm.status != "unmatched" and (sm.intervals or sm.dropped):
+            located = _locate(tm, sm, point, data, options)
+            if not isinstance(located, str):
+                piece_id, local_m = _piece_for(result, located[0], located[1])
+                way = data.ways.get(piece_id)
+                if way is not None:
+                    cum = _chainage(data, way)
+                    near = [
+                        (abs(cum[k] - local_m), node_id)
+                        for k, node_id in enumerate(way.nodes)
+                        if EXPOSURE_KEY in data.nodes[node_id].tags
+                        and abs(cum[k] - local_m) <= options.snap_m
+                    ]
+                    if near:
+                        return min(near)[1]
+    nearby = _nearby_exposure_node(data, point, options)
+    return nearby[0].id if nearby else None
+
+
+def _remove_stale(
+    data: OsmData, result: ApplyResult, out: PointsResult, options: PointOptions
+) -> None:
+    """Untag exposure nodes on surveyed stretches that no point of this run backs."""
+    supported = {n for c in out.changes for n in (c.node_id, c.backs_node_id) if n is not None}
+    # A point that couldn't be placed may be the one behind a node, so its
+    # segment's stretches are left alone (the whole track's, when the point
+    # names no known segment).
+    unplaced = [c for c in out.changes if c.status == "unplaced"]
+    guarded_labels = {c.source for c in unplaced if c.source}
+    guarded_tracks = {c.track_name for c in unplaced if not c.source}
+
+    seen: set[int] = set()
+    for change in result.ways:
+        if not change.pieces or change.status == "refused":
+            continue
+        piece_ids = {p.way_id for p in change.pieces}
+        for piece in change.pieces:
+            way = data.ways.get(piece.way_id)
+            if way is None:
+                continue
+            cum = _chainage(data, way)
+            for k, node_id in enumerate(way.nodes):
+                node = data.nodes[node_id]
+                if EXPOSURE_KEY not in node.tags or node_id in supported or node_id in seen:
+                    continue
+                # Strictly inside a stretch whose survey rated exposure; a
+                # node on the edge of the survey may belong to what's beyond.
+                along_m = piece.start_m + cum[k]
+                covering: list[Claim] = [
+                    c
+                    for c in change.claims
+                    if EXPOSURE_KEY in c.tags and c.start_m < along_m < c.end_m
+                ]
+                if not covering:
+                    continue
+                if any(
+                    w.id not in piece_ids
+                    for w in data.parent_ways(node_id)
+                    if w.tags.get("highway")
+                ):
+                    continue  # a junction with a way this survey may not cover
+                seen.add(node_id)
+                claim = max(covering, key=lambda c: c.surveyed)
+                old = node.tags[EXPOSURE_KEY]
+                stale = StaleNode(
+                    node_id, way.id, old, "kept", "", list(claim.sources), claim.surveyed,
+                    node.lat, node.lon,
+                )  # fmt: skip
+                out.stale.append(stale)
+                held = [s for s in claim.sources if s in guarded_labels]
+                if held or claim.track_name in guarded_tracks:
+                    stale.reason = (
+                        f"an Exposure point of {sources_text(held) or claim.track_name} "
+                        "couldn't be placed, and it may be this node's"
+                    )
+                elif survey_newer_than_edit(claim.surveyed, node.timestamp):
+                    stale.status = "removed"
+                    stale.reason = (
+                        f"the survey ({survey_day(claim.surveyed)}) is newer than the node's "
+                        f"last OSM edit ({survey_day(node.timestamp or '')})"
+                    )
+                elif options.force:
+                    stale.status, stale.reason = "removed", "forced (--force)"
+                else:
+                    stale.status = "refused"
+                    stale.reason = (
+                        f"the node's last OSM edit ({survey_day(node.timestamp or '') or '?'}) "
+                        f"is not older than the survey ({survey_day(claim.surveyed) or '?'})"
+                    )
+                if stale.status == "removed":
+                    del node.tags[EXPOSURE_KEY]
+                    data.mark_modified(node)
+
+
 def apply_points(
     data: OsmData,
     matches: list[TrackMatch],
@@ -293,6 +439,7 @@ def apply_points(
             found = _segment_match(tm, point)
             seg_name = found[0].name if found else (point.segment_name or "?")
             change = PointChange(track.name, seg_name, point, value, "skipped")
+            change.source = _label(track.name, found[0]) if found else ""
             out.changes.append(change)
 
             if not options.enabled:
@@ -301,10 +448,13 @@ def apply_points(
             if problem:
                 change.status = "skipped" if value == NOT_RATED else "unplaced"
                 change.reason = problem
+                if value == NOT_RATED:
+                    change.backs_node_id = _existing_node_for(tm, point, data, result, options)
                 continue
             assert value is not None
             if value < options.min_exposure:
                 change.reason = f"rated {value}, below --exposure-min {options.min_exposure}"
+                change.backs_node_id = _existing_node_for(tm, point, data, result, options)
                 continue
             if found is None:
                 change.status = "unplaced"
@@ -424,4 +574,6 @@ def apply_points(
                         "the higher rating stays"
                     )
             by_node[node.id] = change
+    if options.enabled and options.remove_stale:
+        _remove_stale(data, result, out, options)
     return out

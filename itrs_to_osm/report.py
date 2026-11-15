@@ -17,7 +17,7 @@ from typing import Any
 from .itrs import DIRECTION_ONE_WAY, DIRECTION_TWO_WAY, USE_BIKE_ONLY, USE_SHARED, Segment, Track
 from .match import Interval, MatchOptions, SegmentMatch, TrackMatch
 from .osm import OsmData, Way
-from .points import EXPOSURE_TYPE, PointChange, PointOptions, PointsResult
+from .points import EXPOSURE_TYPE, PointChange, PointOptions, PointsResult, StaleNode
 from .split import ApplyResult, CutOptions, WayChange, sources_text, survey_day
 from .tagging import (
     EXPOSURE_KEY,
@@ -81,6 +81,7 @@ def edit_size(ctx: RunContext) -> int:
         + r.relations_modified
         + pts.nodes_added
         + len(pts.written)
+        + len(pts.removed)
     )
 
 
@@ -307,6 +308,22 @@ def point_status_text(change: PointChange) -> str:
     return f"skipped: {change.reason}" if change.reason else change.status
 
 
+def stale_text(ctx: RunContext, s: StaleNode) -> list[Any]:
+    """One line for a stale exposure node: what it carried, where, what happened."""
+    did = {
+        "removed": "tag removed",
+        "refused": "refused, tag left in place",
+        "kept": "tag left in place",
+    }[s.status]
+    return [
+        Link(f"n{s.node_id}", OSM_NODE_URL.format(s.node_id)),
+        f" on {piece_title(ctx, s.way_id)}: had {EXPOSURE_KEY}={s.old}, and "
+        f"{sources_text(s.sources)} (surveyed {survey_day(s.surveyed) or 'unknown'}) has no "
+        f"Exposure point there. {did[0].upper()}{did[1:]}: {s.reason}. ",
+        Link(f"{s.lat:.5f}, {s.lon:.5f}", map_url(s.lat, s.lon)),
+    ]
+
+
 def point_placement_text(change: PointChange) -> str:
     """How the node was chosen, and how far the point sat from the way."""
     if change.node_id is None:
@@ -473,8 +490,21 @@ def _summary(ctx: RunContext) -> list[Block]:
         f"OSM relations updated: {r.relations_modified}",
         _exposure_totals(ctx),
         f"Overlapping surveys: {len(r.overlaps)}" + (" (see Advisories)" if r.overlaps else ""),
-        f"Refusals: {len(r.refusals) + len(pts.refusals)}",
+        f"Refusals: {len(r.refusals) + len(pts.refusals) + len(pts.stale_refusals)}",
     ]
+    if pts.stale:
+        kept = len(pts.stale) - len(pts.removed) - len(pts.stale_refusals)
+        counts = [
+            (len(pts.removed), "tag removed"),
+            (len(pts.stale_refusals), "refused"),
+            (kept, "left in place"),
+        ]
+        totals.insert(
+            6,
+            f"Stale exposure nodes (no ITRS point behind them any more): {len(pts.stale)} ("
+            + ", ".join(f"{n} {words}" for n, words in counts if n)
+            + ")",
+        )
     blocks.append(Para(Strong("Totals:")))
     blocks.append(ItemList(totals))
     if r.refusals:
@@ -496,6 +526,17 @@ def _summary(ctx: RunContext) -> list[Block]:
                     f"{len(pts.refusals)} node(s) already carry a different {EXPOSURE_KEY} "
                     f"value: {', '.join(f'n{n}' for n in nodes)}. Those nodes were left as "
                     "they are. Rerun with --force to overwrite them."
+                )
+            )
+        )
+    if pts.stale_refusals:
+        nodes = sorted(s.node_id for s in pts.stale_refusals)
+        blocks.append(
+            Para(
+                Strong(
+                    f"{len(pts.stale_refusals)} stale exposure node(s) were edited in OSM "
+                    f"after the survey: {', '.join(f'n{n}' for n in nodes)}. Those nodes were "
+                    "left as they are. Rerun with --force to remove their tag."
                 )
             )
         )
@@ -740,8 +781,11 @@ def _nodes_section(ctx: RunContext) -> list[Block]:
         )
         return blocks
     if not ctx.points.changes:
-        blocks.append(Para("None."))
-        return blocks
+        if not ctx.points.stale and po.remove_stale:
+            blocks.append(Para("None."))
+            return blocks
+        blocks.append(Para("No ITRS Exposure points in this run."))
+        return blocks + _stale_section(ctx)
     blocks.append(
         Para(
             "Segment, Exposure, ITRS detail, Photos, and Location come from the ITRS export. "
@@ -796,17 +840,59 @@ def _nodes_section(ctx: RunContext) -> list[Block]:
                 rows,
             )
         )
-    blocks.append(
+    return blocks + _stale_section(ctx)
+
+
+def _stale_section(ctx: RunContext) -> list[Block]:
+    """Existing exposure nodes the survey no longer has a point for."""
+    po = ctx.point_options
+    search: list[Any] = ["(Edit -> Search for ", Code(f'"{EXPOSURE_KEY}"=*'), ")"]
+    if not po.remove_stale:
+        return [
+            Para(
+                [
+                    Strong("Stale exposure nodes:"),
+                    " not checked (--keep-stale-exposure-nodes). In JOSM, look for exposure "
+                    "nodes along these trails ",
+                    *search,
+                    " and remove the tag from any the survey no longer supports.",
+                ]
+            )
+        ]
+    scope: list[Any] = [
+        "Only the surveyed stretches are checked. A node past the end of the survey, on a "
+        "junction with another way, on a way that was refused, or on a segment with no "
+        "exposure rating is not touched; look for those in JOSM ",
+        *search,
+        ".",
+    ]
+    stale = ctx.points.stale
+    if not stale:
+        return [
+            Para(
+                [
+                    Strong("Stale exposure nodes:"),
+                    f" none found. A stale node is an existing node with {EXPOSURE_KEY} that "
+                    "the survey no longer has an Exposure point for. ",
+                    *scope,
+                ]
+            )
+        ]
+    return [
         Para(
             [
-                "This tool can't remove a node for a point ITRS no longer exports. In JOSM, "
-                "look for stale exposure nodes along these trails (Edit -> Search for ",
-                Code(f'"{EXPOSURE_KEY}"=*'),
-                ") and delete any the survey no longer supports.",
+                Strong("Stale exposure nodes:"),
+                f" each of these existing nodes has {EXPOSURE_KEY} and sits on a stretch this "
+                "run surveyed, but the survey has no Exposure point there. ITRS exports a "
+                "point for every exposed section it rates, so the survey no longer supports "
+                "the node. When the survey is newer than the node's last OSM edit, this tool "
+                "removes the tag and leaves the node (it's part of the way's shape). If the "
+                "node was edited after the survey, the tool refuses unless --force is given.",
             ]
-        )
-    )
-    return blocks
+        ),
+        ItemList([stale_text(ctx, s) for s in stale]),
+        Para(scope),
+    ]
 
 
 def _not_applied(ctx: RunContext) -> list[Block]:
@@ -888,6 +974,12 @@ def _not_applied(ctx: RunContext) -> list[Block]:
                 )
             elif c.status in ("unplaced", "skipped"):
                 lines.append(f"{label}: {point_status_text(c)}")
+        for s in ctx.points.stale:
+            if s.status != "removed":
+                lines.append(
+                    f"Stale exposure node n{s.node_id} ({EXPOSURE_KEY}={s.old}): tag not "
+                    f"removed ({'refused; ' if s.status == 'refused' else ''}{s.reason})"
+                )
     return [
         Heading(2, "Not applied"),
         Para("ITRS data that produced no OSM edit, and why."),
@@ -1218,6 +1310,12 @@ def _review_steps(ctx: RunContext) -> list[Block]:
             "Look at each node listed under OSM nodes changed. It should sit on the trail at "
             "an exposed spot, not on a junction. If a nearby node already marks the same spot "
             "from an earlier upload, select both and merge them (Tools -> Merge Nodes)."
+        )
+    if ctx.points.removed:
+        steps.append(
+            "Look at each stale node listed under OSM nodes changed. The exposure tag is gone "
+            "and the node stays. Check that the spot really is no longer exposed per the "
+            "survey; undo the change on any node you know better about."
         )
     steps += [
         "Paste the changeset tags listed below into the upload dialog.",

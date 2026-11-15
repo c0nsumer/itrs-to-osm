@@ -69,6 +69,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--no-exposure-nodes", action="store_true", help="write no nodes for Exposure points"
     )
+    p.add_argument(
+        "--keep-stale-exposure-nodes",
+        action="store_true",
+        help="leave exposure nodes the survey has no point for (default: remove their tag)",
+    )
     p.add_argument("--html", action="store_true", help="also write an HTML report")
     p.add_argument("--dry-run", action="store_true", help="match and report, write no .osm")
     p.add_argument("-v", "--verbose", action="store_true")
@@ -172,6 +177,7 @@ def run(args: argparse.Namespace) -> int:
         max_offset_m=args.max_offset,
         force=args.force,
         enabled=not args.no_exposure_nodes,
+        remove_stale=not args.keep_stale_exposure_nodes,
     )
 
     matches = [match_track(t, data, match_options) for t in tracks]
@@ -212,10 +218,15 @@ def run(args: argparse.Namespace) -> int:
     if large:
         print(f"warning: {large}", file=sys.stderr)
     refused = len(result.refusals) + len(points.refusals)
-    if refused and not args.force:
+    stale = len(points.stale_refusals)
+    if (refused or stale) and not args.force:
+        what = []
+        if refused:
+            what.append(f"{refused} existing ITRS value(s) differ")
+        if stale:
+            what.append(f"{stale} stale exposure node(s) edited since the survey")
         print(
-            f"refused: {refused} existing ITRS value(s) differ; "
-            "see the report, or rerun with --force to overwrite",
+            f"refused: {', '.join(what)}; see the report, or rerun with --force to overwrite",
             file=sys.stderr,
         )
         return EXIT_REFUSED
@@ -236,7 +247,8 @@ def summary_line(ctx: RunContext, report_path: Path) -> str:
         f"{len(ways.modified_ways)} way(s) modified, {ways.ways_added} created by splits, "
         f"{ways.nodes_added + ctx.points.nodes_added} node(s) added, "
         f"{ways.relations_modified} relation(s) updated",
-        f"{len(ctx.points.written)} exposure node(s) tagged",
+        f"{len(ctx.points.written)} exposure node(s) tagged"
+        + (f", {len(ctx.points.removed)} stale untagged" if ctx.points.removed else ""),
     ]
     if ctx.osm_path:
         parts.append(f"wrote {ctx.osm_path}")

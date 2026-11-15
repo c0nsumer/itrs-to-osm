@@ -22,6 +22,7 @@ from typing import Any
 
 from .itrs import NOT_RATED
 from .report import (
+    OSM_NODE_URL,
     OSM_WAY_URL,
     Block,
     Code,
@@ -66,6 +67,7 @@ LEAFLET_JS_SRI = "sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
 
 COLOR_TRACK = "#555555"
 COLOR_POINT = "#ffffff"  # an ITRS point this tool wrote nothing for
+COLOR_STALE = "#888888"  # an existing exposure node the survey has no point for
 COLOR_NOT_RATED = LEVEL_COLORS[NOT_RATED]  # ITRS draws roads and 0 in purple
 
 _e = html.escape
@@ -278,6 +280,29 @@ def map_data(ctx: RunContext) -> dict[str, Any]:
             lats.append(lat)
             lons.append(lon)
 
+    for stale in ctx.points.stale:
+        did = "tag removed" if stale.status == "removed" else f"tag left in place ({stale.status})"
+        lines = [
+            f"had {EXPOSURE_KEY}={stale.old}; the survey has no Exposure point here",
+            f"{did}: {stale.reason}",
+            f"way: {piece_title(ctx, stale.way_id)}",
+        ]
+        points.append(
+            {
+                "lat": stale.lat,
+                "lon": stale.lon,
+                "color": COLOR_STALE,
+                "written": stale.status == "removed",
+                "popup": _popup(
+                    f"Stale exposure node n{stale.node_id}",
+                    lines,
+                    OSM_NODE_URL.format(stale.node_id),
+                ),
+            }
+        )
+        lats.append(stale.lat)
+        lons.append(stale.lon)
+
     bounds = [[min(lats), min(lons)], [max(lats), max(lons)]] if lats else None
     return {"lines": pieces + tracks, "points": points, "bounds": bounds}
 
@@ -300,6 +325,7 @@ def _legend() -> str:
         for v in sorted(EXPOSURE_NAMES)
     ]
     node_rows.append((COLOR_POINT, "ITRS point (not written)", "dot"))
+    node_rows.append((COLOR_STALE, "Stale exposure node (no ITRS point now)", "dot"))
 
     def group(title: str, rows: list[tuple[str, str, str]]) -> str:
         items = "".join(

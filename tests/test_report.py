@@ -325,7 +325,11 @@ def test_exposure_node_refused_and_forced(tmp_path):
     (refused,) = ctx.points.refusals
     assert "refused (node has 3)" in md
     assert "node(s) already carry a different" in md and f"n{refused.node_id}" in md
-    assert "Refusals: 1" in md
+    # The other pre-tagged nodes have no point behind them and no edit date: stale, refused.
+    stale = ctx.points.stale_refusals
+    assert stale and refused.node_id not in {s.node_id for s in stale}
+    assert f"Refusals: {1 + len(stale)}" in md
+    assert "stale exposure node(s) were edited in OSM after the survey" in md
     not_applied = md[md.index("## Not applied") : md.index("## Advisories")]
     assert f"nothing written to n{refused.node_id}, existing {EXPOSURE_KEY}=3" in not_applied
 
@@ -333,6 +337,7 @@ def test_exposure_node_refused_and_forced(tmp_path):
     md = markdown(ctx, tmp_path)
     advisories = md[md.index("## Advisories") :]
     (c,) = ctx.points.written
+    assert len(ctx.points.removed) == len(stale) and "Tag removed: forced (--force)" in md
     assert f"node {c.node_id}: {EXPOSURE_KEY} was 3, now 2 (Test Trail / S002)" in advisories
 
 
