@@ -177,7 +177,9 @@ def test_cli_refuses_then_forces_then_keeps(tmp_path, capsys):
     args = [str(src), "--osm", str(osm), "--html"]
 
     assert main(args) == EXIT_REFUSED
-    assert "1 stale exposure node(s) edited since the survey" in capsys.readouterr().err
+    captured = capsys.readouterr()
+    assert "1 stale exposure node(s) edited since the survey" in captured.err
+    assert f"html report {tmp_path / 'Resurvey.report.html'}" in captured.out
     md = (tmp_path / "Resurvey.report.md").read_text(encoding="utf-8")
     assert "Refusals: 1" in md and f"n{node_id}" in md
     assert "Refused, tag left in place" in md
@@ -192,7 +194,8 @@ def test_cli_refuses_then_forces_then_keeps(tmp_path, capsys):
     assert "Tag removed: forced (--force)" in md and "Look at each stale node" in md
     assert "Stale exposure node n" in (tmp_path / "Resurvey.report.html").read_text("utf-8")
 
-    assert main([*args, "--keep-stale-exposure-nodes"]) == EXIT_OK
+    assert main([str(src), "--osm", str(osm), "--keep-stale-exposure-nodes"]) == EXIT_OK
+    assert "html report" not in capsys.readouterr().out
     md = (tmp_path / "Resurvey.report.md").read_text(encoding="utf-8")
     assert "not checked (--keep-stale-exposure-nodes)" in md
     assert EXPOSURE_KEY in read_osm_file(tmp_path / "Resurvey.osm").nodes[node_id].tags

@@ -59,7 +59,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--snap-junction", type=float, default=15.0, help="snap a cut to a junction within, m (15)"
     )
     p.add_argument("--min-piece", type=float, default=15.0, help="drop pieces shorter than, m (15)")
-    p.add_argument("--force", action="store_true", help="overwrite differing existing ITRS values")
+    p.add_argument(
+        "--force", action="store_true", help="overwrite differing ITRS values, untag stale nodes"
+    )
     p.add_argument(
         "--exposure-min",
         type=int,
@@ -208,12 +210,14 @@ def run(args: argparse.Namespace) -> int:
     )
     report_path = base.with_name(base.name + ".report.md")
     write_markdown(ctx, report_path)
+    html_path: Path | None = None
     if args.html:
         from .html_report import write_html
 
-        write_html(ctx, base.with_name(base.name + ".report.html"))
+        html_path = base.with_name(base.name + ".report.html")
+        write_html(ctx, html_path)
 
-    print(summary_line(ctx, report_path))
+    print(summary_line(ctx, report_path, html_path))
     large = large_edit_warning(ctx)
     if large:
         print(f"warning: {large}", file=sys.stderr)
@@ -233,7 +237,7 @@ def run(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def summary_line(ctx: RunContext, report_path: Path) -> str:
+def summary_line(ctx: RunContext, report_path: Path, html_path: Path | None = None) -> str:
     segs = [sm for tm in ctx.matches for sm in tm.segments]
     counts = {
         "matched": sum(sm.status == "matched" for sm in segs),
@@ -253,6 +257,8 @@ def summary_line(ctx: RunContext, report_path: Path) -> str:
     if ctx.osm_path:
         parts.append(f"wrote {ctx.osm_path}")
     parts.append(f"report {report_path}")
+    if html_path:
+        parts.append(f"html report {html_path}")
     return "\n".join(parts)
 
 

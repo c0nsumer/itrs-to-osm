@@ -17,7 +17,7 @@ that the mapper opens in [JOSM](https://josm.openstreetmap.de/), reviews, and
 uploads. By having a human review it avoids many of the mechanical edit
 pitfalls while providing a significant automation benefit.
 
-As of v0.3.0 it handles GeoJSON exports from ITRS app versions 4.4 through 5.3
+As of v0.4.0 it handles GeoJSON exports from ITRS app versions 4.4 through 5.3
 and writes these two tags on ways:
 
 - `segment_tech_rating` -> [`mtb:scale:itrs:technical_difficulty`](https://wiki.openstreetmap.org/wiki/Key:mtb:scale:itrs:technical_difficulty) (1 to 5)

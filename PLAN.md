@@ -372,8 +372,8 @@ becomes a node on the way with the same key:
 - Same conflict policy as ways: a node that already has the key with a
   different value is refused (exit 2) unless `--force`; equal is "already
   tagged". Two points landing on one node keep the higher rating and the
-  report says so. The tool can't remove a node for a point ITRS no longer
-  exports; the report tells the reviewer to look for stale ones.
+  report says so. A node for a point ITRS no longer exports loses its tag
+  (see Updates, 2026-Nov-15).
 - Report: a body section "OSM nodes changed" lists every Exposure point
   with its rating, the node (existing or inserted, how far it moved), the
   piece it sits on, the ITRS detail, photos, and a map link; points not
@@ -687,4 +687,17 @@ building against the real tracks:
   that points at the Automated Edits code of conduct, and an "OSM policies"
   section in the README linking the code of conduct, Automated edits, and
   the Import guidelines.
-
+- 2026-Nov-15: Steve keeps applying new surveys over ways that already
+  carry ITRS tags, and the new survey often has fewer or different Exposure
+  points than OSM has nodes. So the tool now removes the tag from a stale
+  exposure node: an existing node strictly inside a stretch the run
+  surveyed (a claim that rated exposure), with no point of the run behind
+  it. The node stays, as it's part of the way's shape. Same date rule as a
+  differing value: removed when the survey is newer than the node's last
+  OSM edit, else refused (exit 2) unless `--force`. Left alone: nodes past
+  the end of the survey, junctions with a way outside the run, refused
+  ways, segments with no exposure rating, and segments with a point that
+  couldn't be placed. A point below `--exposure-min` still backs its node.
+  `--keep-stale-exposure-nodes` turns the removal off, and
+  `--no-exposure-nodes` turns it off along with tagging. Also: `--html` now
+  lists the HTML report in the run's output.
