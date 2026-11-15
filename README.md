@@ -273,10 +273,13 @@ that the local community has been told.
 
 ## What it won't do
 
-It won't upload anything, by design. It doesn't edit access or oneway tags
-either; where the survey disagrees with OSM about direction or who may use
-the trail, the report says so under "Advisories" and leaves the decision to
-you.
+itrs-to-osm has no ability to submit data or changes to OSM. By design it
+won't, and can't, upload anything, so a human is always in the loop for data
+changes.
+
+It also doesn't edit access or oneway tags; where the survey disagrees with
+OSM about direction or who may use the trail, the report says so under
+"Advisories" and leaves the decision to you.
 
 ## Development
 
